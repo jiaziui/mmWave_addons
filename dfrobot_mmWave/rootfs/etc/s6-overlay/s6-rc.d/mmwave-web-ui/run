@@ -1,0 +1,18 @@
+#!/command/with-contenv bashio
+set -euo pipefail
+
+cd /app
+export NODE_ENV="${NODE_ENV:-production}"
+PORT_CONFIG="$(bashio::config 'port')"
+if [ -n "${PORT_CONFIG}" ] && [ "${PORT_CONFIG}" != "null" ]; then
+  export PORT="${PORT_CONFIG}"
+else
+  export PORT="${PORT:-42069}"
+fi
+
+bashio::log.info "Starting DFRobot mmWave UI on port ${PORT}"
+if [ "${PORT}" != "42069" ]; then
+  bashio::log.warning "Ingress is configured for port 42069. Changing app port may disable ingress."
+fi
+
+exec node backend/dist/index.js
