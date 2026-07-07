@@ -246,42 +246,42 @@ class MmwaveService {
             basics: [
                 {
                     key: "installMode",
-                    label: "瀹夎鏂瑰紡",
+                    label: "安装方式",
                     value: readString(statesById, `select.${syncedDevice.prefix}_install_mode`) ?? "-",
                 },
                 {
                     key: "realTimePeopleTime",
-                    label: "瀹炴椂浜烘暟涓婃姤鏃堕棿",
+                    label: "实时人数上报时间",
                     value: numberLabel(readNumber(statesById, `number.${syncedDevice.prefix}_real_time_people_time`), " s"),
                 },
                 {
                     key: "installHeight",
-                    label: "瀹夎楂樺害",
+                    label: "安装高度",
                     value: numberLabel(readNumber(statesById, `number.${syncedDevice.prefix}_install_height`), " cm"),
                 },
                 {
                     key: "trackMeters",
-                    label: "杞ㄨ抗浜х敓绫虫暟",
+                    label: "轨迹产生米数",
                     value: numberLabel(readNumber(statesById, `number.${syncedDevice.prefix}_track_meters`), " m"),
                 },
                 {
                     key: "detectionRangeMode",
-                    label: "鎺㈡祴妯″紡",
+                    label: "探测模式",
                     value: readString(statesById, `text_sensor.${syncedDevice.prefix}_detection_range_mode`) ?? "-",
                 },
                 {
                     key: "trackExistsTime",
-                    label: "杞ㄨ抗瀛樺湪鏃堕棿",
+                    label: "轨迹存在时间",
                     value: numberLabel(readNumber(statesById, `number.${syncedDevice.prefix}_track_exists_time`), " s"),
                 },
                 {
                     key: "checkToActiveFrames",
-                    label: "纭甯ф暟",
+                    label: "确认帧数",
                     value: numberLabel(readNumber(statesById, `number.${syncedDevice.prefix}_check_to_active_frames`)),
                 },
                 {
                     key: "unmannedTime",
-                    label: "鏃犱汉鏃堕棿",
+                    label: "无人时间",
                     value: numberLabel(readNumber(statesById, `number.${syncedDevice.prefix}_unmanned_time`), " s"),
                 },
             ],

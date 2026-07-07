@@ -11,6 +11,8 @@ const pino_http_1 = __importDefault(require("pino-http"));
 const logger_1 = require("./logger");
 const meta_1 = require("./routes/meta");
 const devices_1 = require("./routes/devices");
+const utf8StaticExtensions = new Set([".html", ".js", ".css", ".svg"]);
+const withUtf8Charset = (contentType) => /;\s*charset=/i.test(contentType) ? contentType : `${contentType}; charset=utf-8`;
 const createServer = (config, deps) => {
     const app = (0, express_1.default)();
     app.use((0, pino_http_1.default)({
@@ -25,13 +27,27 @@ const createServer = (config, deps) => {
     });
     if (config.frontendDist && fs_1.default.existsSync(config.frontendDist)) {
         const indexHtml = path_1.default.join(config.frontendDist, "index.html");
-        app.use(express_1.default.static(config.frontendDist));
+        app.use(express_1.default.static(config.frontendDist, {
+            setHeaders: (res, filePath) => {
+                if (!utf8StaticExtensions.has(path_1.default.extname(filePath).toLowerCase())) {
+                    return;
+                }
+                const contentType = res.getHeader("Content-Type");
+                if (typeof contentType === "string") {
+                    res.setHeader("Content-Type", withUtf8Charset(contentType));
+                }
+            },
+        }));
         app.get("*", (req, res, next) => {
             if (req.path.startsWith("/api/")) {
                 next();
                 return;
             }
-            res.sendFile(indexHtml);
+            res.sendFile(indexHtml, {
+                headers: {
+                    "Content-Type": "text/html; charset=utf-8",
+                },
+            });
         });
     }
     else {

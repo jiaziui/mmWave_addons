@@ -12,6 +12,11 @@ export interface ServerDependencies {
   service: MmwaveService;
 }
 
+const utf8StaticExtensions = new Set([".html", ".js", ".css", ".svg"]);
+
+const withUtf8Charset = (contentType: string): string =>
+  /;\s*charset=/i.test(contentType) ? contentType : `${contentType}; charset=utf-8`;
+
 export const createServer = (config: AppConfig, deps: ServerDependencies): express.Express => {
   const app = express();
 
@@ -32,13 +37,29 @@ export const createServer = (config: AppConfig, deps: ServerDependencies): expre
 
   if (config.frontendDist && fs.existsSync(config.frontendDist)) {
     const indexHtml = path.join(config.frontendDist, "index.html");
-    app.use(express.static(config.frontendDist));
+    app.use(
+      express.static(config.frontendDist, {
+        setHeaders: (res, filePath) => {
+          if (!utf8StaticExtensions.has(path.extname(filePath).toLowerCase())) {
+            return;
+          }
+          const contentType = res.getHeader("Content-Type");
+          if (typeof contentType === "string") {
+            res.setHeader("Content-Type", withUtf8Charset(contentType));
+          }
+        },
+      }),
+    );
     app.get("*", (req, res, next) => {
       if (req.path.startsWith("/api/")) {
         next();
         return;
       }
-      res.sendFile(indexHtml);
+      res.sendFile(indexHtml, {
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+        },
+      });
     });
   } else {
     logger.warn({ frontendDist: config.frontendDist }, "Frontend dist not found");

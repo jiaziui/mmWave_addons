@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+﻿import { useEffect, useMemo, useState } from "react";
 import {
   createLiveWsUrl,
   discoverDevices,
@@ -315,12 +315,12 @@ function App() {
 
   const handleInitializeDevice = (device: StoredMmwaveDevice) => {
     setError("");
-    setMessage(`设备 ${device.name} 的初始化接口暂未接入`);
+    setMessage("设备 " + device.name + " 的初始化接口暂未接入");
   };
 
   const handleDeleteDevice = (device: StoredMmwaveDevice) => {
     setError("");
-    setMessage(`设备 ${device.name} 的删除接口暂未接入`);
+    setMessage("设备 " + device.name + " 的删除接口暂未接入");
   };
 
   const deviceManagementStats = {
@@ -333,7 +333,7 @@ function App() {
     <div className="welcome-shell">
       <div className="welcome-panel">
         <div className="brand-mark">
-          <img src="./logo.svg" alt="DFRobot mmWave" className="brand-logo-image" />
+          <img src="./ui_logo.svg" alt="DFRobot mmWave" className="brand-logo-image" />
         </div>
         <div className="brand-copy">
           <p className="eyebrow">DFRobot mmWave Platform</p>
@@ -365,11 +365,7 @@ function App() {
     <aside className="sidebar">
       <div className="sidebar-header">
         <div className="sidebar-logo">
-          <img src="./logo.svg" alt="DFRobot mmWave" className="brand-logo-image" />
-        </div>
-        <div>
-          <strong>DFRobot mmWave</strong>
-          <span>毫米波控制台</span>
+          <img src="./ui_logo.svg" alt="DFRobot mmWave" className="brand-logo-image" />
         </div>
       </div>
       <nav className="sidebar-nav">
@@ -425,11 +421,7 @@ function App() {
         <div className="panel-header">
           <div>
             <h3>实时监控矩阵</h3>
-            <span>固定坐标系 X(-5~5m) / Y(0~9m)</span>
           </div>
-          <span className="status-pill">
-            {meta?.mqttConnected ? "MQTT 轨迹已连接" : meta?.mqttConfigured ? "MQTT 已配置，等待连接" : "未配置 MQTT，显示降级"}
-          </span>
         </div>
 
         {overviewCards.length ? (
@@ -439,7 +431,6 @@ function App() {
                 <div className="device-card-head">
                   <div>
                     <strong>{card.name}</strong>
-                    <span>{card.online ? "Online" : "Offline"}</span>
                   </div>
                   <small>{card.status}</small>
                 </div>
@@ -502,9 +493,7 @@ function App() {
               targets={detail.targets}
               large
             />
-            {!detail.trajectoryAvailable ? (
-              <div className="degraded-banner">未接收到 MQTT 轨迹点，当前只显示范围框与区域标签。</div>
-            ) : null}
+            {!detail.trajectoryAvailable ? <div className="degraded-banner">未接收到 MQTT 轨迹点，当前只显示范围框与区域标签。</div> : null}
           </section>
           <div className="detail-side">
             <section className="panel compact-panel">
@@ -622,7 +611,7 @@ function App() {
                       <td>{device.haDeviceId ?? device.prefix}</td>
                       <td>{getDeviceTypeLabel(device)}</td>
                       <td>
-                        <span className={`device-status-badge device-status-${status.toLowerCase()}`}>{status}</span>
+                        <span className={"device-status-badge device-status-" + status.toLowerCase()}>{status}</span>
                       </td>
                       <td>
                         <div className="device-row-actions">
@@ -685,10 +674,6 @@ function App() {
     <div className="app-shell">
       {renderSidebar()}
       <main className="content-shell">
-        <div className="top-strip">
-          <span>{meta?.linked ? "Home Assistant 已连接" : "Home Assistant 未连接"}</span>
-          <span>{busy ? "处理中..." : new Date().toLocaleString()}</span>
-        </div>
         {message ? <div className="notice notice-info">{message}</div> : null}
         {error ? <div className="notice notice-error">{error}</div> : null}
         {view === "overview" ? renderOverview() : null}
@@ -701,3 +686,4 @@ function App() {
 }
 
 export default App;
+

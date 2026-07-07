@@ -10,18 +10,15 @@ log相关:
 
 项目构造参考：https://developers.home-assistant.io/docs/apps/tutorial
 
-# 开发需求描述
-按照需求开发完界面工程：05_Software\home_assistant\mmWave_addons，搭建工程时，参考everything-presence-addons
-1.将我的工程初始化，按照addon工程的规则，之前的工程05_Software\home_assistant\dfrobot_c4004_addons，现在我要进行迁移重构；我先说一下我重构的理由，
-(1).我的整个工程名变化，变成以后要进行更改。
-(2).工程未来可能要扩展其它毫米波传感器；需要为后续做准备；
-(3).界面布局变化大，c4004拓展的多设备部署方案改变；
-(4).交互方式上变化大改变；另外要帮我完成对应的后端内容；关于后端的架构、计数方案，可以直接参考；05_Software\home_assistant\dfrobot_c4004_addons\dfrobot_c4004_app，因为它就是我的验证、预研工程；
+# 开发需求
 
-2.现在界面分为三大部分
-用户初次进入界面参考05_Software\home_assistant\mmWave_addons\resource\主页.png，界面主要为三大主要功能界面，分别是 设备总览、设备管理、区域管理，这些功能界面，通过侧边栏进行跳转，整个侧边栏界面风格；
 
-2.1、设备总览
+
+
+## 详细需求描述：
+### 界面三大部分（设备总览、设备管理、区域管理）
+
+1.1、设备总览（已经开发，不用管，你也不用开发）
 设备总览界面风格和界面参考，其中有红色字体做了区域标识说明了那部分什么内容或怎么修改；
 参考路径为05_Software\home_assistant\mmWave_addons\resource\设备总览界面.png；
 这个界面主界面顶部要展示总设备数、当前总人数、当前探测总人数、当前静止总人数；
