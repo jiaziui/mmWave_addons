@@ -70,6 +70,13 @@ button {
   letter-spacing: 0.08em;
 }
 
+.brand-logo-image {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
 .brand-copy h1,
 .page-header h2 {
   margin: 0.25rem 0 0;

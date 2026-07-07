@@ -1,7 +1,8 @@
 name: DFRobot mmWave
-version: 0.1.0
+version: 0.1.1
 slug: mmwave_addons
 description: DFRobot mmWave web console for Home Assistant with multi-device overview and device detail pages.
+url: https://www.dfrobot.com/
 arch:
   - aarch64
   - amd64

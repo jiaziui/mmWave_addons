@@ -332,7 +332,9 @@ function App() {
   const renderWelcome = () => (
     <div className="welcome-shell">
       <div className="welcome-panel">
-        <div className="brand-mark">DF</div>
+        <div className="brand-mark">
+          <img src="./logo.svg" alt="DFRobot mmWave" className="brand-logo-image" />
+        </div>
         <div className="brand-copy">
           <p className="eyebrow">DFRobot mmWave Platform</p>
           <h1>毫米波传感器控制平台</h1>
@@ -362,7 +364,9 @@ function App() {
   const renderSidebar = () => (
     <aside className="sidebar">
       <div className="sidebar-header">
-        <div className="sidebar-logo">DF</div>
+        <div className="sidebar-logo">
+          <img src="./logo.svg" alt="DFRobot mmWave" className="brand-logo-image" />
+        </div>
         <div>
           <strong>DFRobot mmWave</strong>
           <span>毫米波控制台</span>
