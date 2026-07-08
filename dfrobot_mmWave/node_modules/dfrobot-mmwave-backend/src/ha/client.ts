@@ -1,4 +1,5 @@
 import type {
+  HaAreaRegistryEntry,
   HaConfig,
   HaDeviceRegistryEntry,
   HaEntityRegistryEntry,
@@ -74,6 +75,24 @@ export class HaClient {
 {{ devices.list | tojson }}`.trim();
       const rendered = await this.renderTemplate(template);
       return this.asArray<HaDeviceRegistryEntry>(JSON.parse(rendered));
+    }
+  }
+
+  async getAreaRegistry(): Promise<HaAreaRegistryEntry[]> {
+    try {
+      return this.asArray<HaAreaRegistryEntry>(await this.request<unknown>("/config/area_registry"));
+    } catch {
+      const template = `
+{% set items = namespace(list=[]) %}
+{% for area_id in areas() %}
+  {% set items.list = items.list + [{
+    'id': area_id,
+    'name': area_name(area_id)
+  }] %}
+{% endfor %}
+{{ items.list | tojson }}`.trim();
+      const rendered = await this.renderTemplate(template);
+      return this.asArray<HaAreaRegistryEntry>(JSON.parse(rendered));
     }
   }
 

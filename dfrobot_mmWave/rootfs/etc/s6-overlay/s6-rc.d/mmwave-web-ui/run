@@ -3,6 +3,7 @@ set -euo pipefail
 
 cd /app
 export NODE_ENV="${NODE_ENV:-production}"
+export DATA_DIR="${DATA_DIR:-/config/dfrobot_mmwave}"
 PORT_CONFIG="$(bashio::config 'port')"
 if [ -n "${PORT_CONFIG}" ] && [ "${PORT_CONFIG}" != "null" ]; then
   export PORT="${PORT_CONFIG}"
@@ -11,6 +12,7 @@ else
 fi
 
 bashio::log.info "Starting DFRobot mmWave UI on port ${PORT}"
+bashio::log.info "Persisting mmWave data in ${DATA_DIR} (Home Assistant host path: /homeassistant/dfrobot_mmwave)"
 if [ "${PORT}" != "42069" ]; then
   bashio::log.warning "Ingress is configured for port 42069. Changing app port may disable ingress."
 fi

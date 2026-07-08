@@ -11,6 +11,16 @@ const REGION_POSITIONS = [
     { x: 2.6, y: 3.6 },
     { x: 0, y: 1.8 },
 ];
+const DETECTION_MODE_PARAMS = {
+    high_sensitivity: {
+        checkToActiveFrames: 2,
+        unmannedTime: 5,
+    },
+    static_stable: {
+        checkToActiveFrames: 7,
+        unmannedTime: 30,
+    },
+};
 const normalizeState = (value) => (value ? value.toLowerCase() : "");
 const isTruthyState = (value) => {
     const normalized = normalizeState(value);
@@ -20,6 +30,7 @@ const isUnavailable = (value) => {
     const normalized = normalizeState(value);
     return normalized === "unknown" || normalized === "unavailable" || normalized === "";
 };
+const isAvailableState = (value) => !isUnavailable(value);
 const toNumber = (value) => {
     if (!value || isUnavailable(value)) {
         return null;
@@ -36,6 +47,14 @@ const numberLabel = (value, suffix = "") => {
 const getEntityState = (statesById, entityId) => statesById.get(entityId);
 const readString = (statesById, entityId) => getEntityState(statesById, entityId)?.state ?? null;
 const readNumber = (statesById, entityId) => toNumber(readString(statesById, entityId));
+const objectIdFromEntityId = (entityId) => entityId.split(".", 2)[1] ?? "";
+const resolveDeviceOnline = (device, statesById, states) => {
+    const onlineState = readString(statesById, `binary_sensor.${device.prefix}_online`);
+    if (onlineState !== null) {
+        return isTruthyState(onlineState);
+    }
+    return states.some((state) => objectIdFromEntityId(state.entity_id).startsWith(`${device.prefix}_`) && isAvailableState(state.state));
+};
 const cloneRangeBox = (rangeBox) => ({ ...rangeBox });
 const buildRangeBox = (statesById, prefix) => {
     const xMin = readNumber(statesById, (0, c4004Profile_1.toEntityId)(prefix, { key: "rangeXMin", domain: "number", slug: "range_x_min", access: "readwrite" }));
@@ -159,6 +178,7 @@ class MmwaveService {
         const devices = await this.storage.replaceFromDiscovery(candidates.map((candidate) => ({
             haDeviceId: candidate.deviceId,
             name: candidate.deviceName ?? candidate.prefix,
+            deploymentName: candidate.deploymentName,
             model: candidate.deviceModel ?? "DFRobot C4004",
             manufacturer: candidate.manufacturer,
             firmwareVersion: candidate.firmwareVersion,
@@ -170,13 +190,26 @@ class MmwaveService {
             entityCount: candidate.entityCount,
             macAddress: candidate.macAddress,
         })));
-        this.mqttBridge.setDevices(devices);
+        this.mqttBridge.setDevices(devices.filter((device) => device.initialized));
         return devices;
     }
-    listDevices() {
-        const devices = this.storage.listDevices();
-        this.mqttBridge.setDevices(devices);
+    async listDevices() {
+        const devices = await this.refreshDeviceStatuses();
+        this.mqttBridge.setDevices(devices.filter((device) => device.initialized));
         return devices;
+    }
+    async refreshDeviceStatuses() {
+        const devices = this.storage.listDevices();
+        if (!this.haClient || !devices.length) {
+            return devices;
+        }
+        const states = await this.haClient.getAllStates();
+        const statesById = new Map(states.map((state) => [state.entity_id, state]));
+        const statusesByPrefix = new Map();
+        for (const device of devices) {
+            statusesByPrefix.set(device.prefix, resolveDeviceOnline(device, statesById, states) ? "online" : "offline");
+        }
+        return this.storage.updateDiscoveryStatuses(statusesByPrefix);
     }
     isMqttConnected() {
         return this.mqttBridge.isConnected();
@@ -188,7 +221,7 @@ class MmwaveService {
         }, options);
     }
     async getOverview() {
-        const devices = this.listDevices();
+        const devices = (await this.listDevices()).filter((device) => device.initialized);
         if (!this.haClient || !devices.length) {
             return { ok: true, metrics: buildMetrics([]), devices: [] };
         }
@@ -310,6 +343,25 @@ class MmwaveService {
         }
         await (0, c4004Profile_1.writeC4004Entity)(this.haClient, device.prefix, "reset");
         return this.getDeviceDetail(deviceId);
+    }
+    async initializeDevice(deviceId, payload) {
+        const current = this.storage.validateInitializeDevice(deviceId, payload);
+        if (!this.haClient) {
+            throw new Error("Home Assistant is not linked");
+        }
+        const modeParams = DETECTION_MODE_PARAMS[payload.detectionMode];
+        await (0, c4004Profile_1.writeC4004Entity)(this.haClient, current.prefix, "installHeight", Math.round(payload.installHeightM * 100));
+        await (0, c4004Profile_1.writeC4004Entity)(this.haClient, current.prefix, "checkToActiveFrames", modeParams.checkToActiveFrames);
+        await (0, c4004Profile_1.writeC4004Entity)(this.haClient, current.prefix, "unmannedTime", modeParams.unmannedTime);
+        const device = this.storage.initializeDevice(deviceId, payload);
+        this.mqttBridge.setDevices(this.storage.listDevices().filter((storedDevice) => storedDevice.initialized));
+        return device;
+    }
+    async unbindDevice(deviceId) {
+        this.storage.unbindDevice(deviceId);
+        const devices = this.haClient ? await this.discoverDevices() : this.storage.listDevices();
+        this.mqttBridge.setDevices(devices.filter((device) => device.initialized));
+        return devices;
     }
     handleTrajectorySnapshot(_deviceId, _snapshot) {
         // Trajectory snapshots stay in MqttBridge memory only.

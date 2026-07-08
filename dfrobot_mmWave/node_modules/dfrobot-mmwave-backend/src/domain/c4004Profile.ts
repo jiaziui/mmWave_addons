@@ -28,6 +28,7 @@ export interface C4004DiscoveryCandidate {
   status: "online" | "offline";
   deviceId?: string;
   deviceName?: string;
+  deploymentName?: string;
   manufacturer?: string;
   deviceModel?: string;
   firmwareVersion?: string;
@@ -80,6 +81,11 @@ const isOnlineStateValue = (value?: string | null) => {
   return normalized === "on" || normalized === "online" || normalized === "true";
 };
 
+const isAvailableStateValue = (value?: string | null) => {
+  const normalized = normalizeStateValue(value);
+  return normalized !== "" && normalized !== "unknown" && normalized !== "unavailable";
+};
+
 const normalizeMacAddress = (value: unknown): string | undefined => {
   if (typeof value !== "string") {
     return undefined;
@@ -115,6 +121,30 @@ const normalizeOptionalString = (value: unknown): string | undefined => {
 
 const getDeviceDisplayName = (device: HaDeviceRegistryEntry): string | undefined =>
   normalizeOptionalString(device.name_by_user) ?? normalizeOptionalString(device.name);
+
+const toDevicePrefix = (value: string): string | undefined => {
+  const prefix = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return prefix.includes("c4004") ? prefix : undefined;
+};
+
+const getDevicePrefix = (device: HaDeviceRegistryEntry): string | undefined => {
+  const rawPrefix = normalizeOptionalString(device.name) ?? normalizeOptionalString(device.name_by_user);
+  return rawPrefix ? toDevicePrefix(rawPrefix) : undefined;
+};
+
+const getAreaDisplayName = (
+  areaId: string | null | undefined,
+  areaRegistry: Map<string, string | undefined>,
+): string | undefined => {
+  if (!areaId) {
+    return undefined;
+  }
+  return areaRegistry.get(areaId);
+};
 
 const isC4004RegistryDevice = (device: HaDeviceRegistryEntry): boolean => {
   const combined = [device.name_by_user, device.name, device.manufacturer, device.model]
@@ -174,13 +204,33 @@ const selectDeviceIdForPrefix = (
   return [...counts.entries()].sort((left, right) => right[1] - left[1])[0]?.[0];
 };
 
+const resolveRelatedStates = (
+  prefix: string,
+  deviceId: string | undefined,
+  entityRegistry: Map<string, HaEntityRegistryEntry>,
+  states: HaEntityState[],
+): HaEntityState[] =>
+  states.filter((state) => {
+    const objectId = objectIdFromEntityId(state.entity_id);
+    return objectId.startsWith(`${prefix}_`) || (deviceId && entityRegistry.get(state.entity_id)?.device_id === deviceId);
+  });
+
+const resolveDeviceStatus = (prefix: string, relatedStates: HaEntityState[]): "online" | "offline" => {
+  const onlineState = relatedStates.find((state) => state.entity_id === toEntityId(prefix, entityDefinitions[0]));
+  if (onlineState) {
+    return isOnlineStateValue(onlineState.state) ? "online" : "offline";
+  }
+  return relatedStates.some((state) => isAvailableStateValue(state.state)) ? "online" : "offline";
+};
+
 export const discoverC4004Devices = async (
   client: HaClient,
 ): Promise<C4004DiscoveryCandidate[]> => {
-  const [states, entityRegistryEntries, deviceRegistryEntries] = await Promise.all([
+  const [states, entityRegistryEntries, deviceRegistryEntries, areaRegistryEntries] = await Promise.all([
     client.getAllStates(),
     client.getEntityRegistry(),
     client.getDeviceRegistry(),
+    client.getAreaRegistry(),
   ]);
 
   const matched = states.map(matchState).filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
@@ -191,39 +241,65 @@ export const discoverC4004Devices = async (
 
   const entityRegistry = new Map(entityRegistryEntries.map((entry) => [entry.entity_id, entry]));
   const deviceRegistry = new Map(deviceRegistryEntries.map((entry) => [entry.id, entry]));
+  const areaRegistry = new Map(
+    areaRegistryEntries.map((entry) => [entry.id, normalizeOptionalString(entry.name)]),
+  );
 
   const candidates: C4004DiscoveryCandidate[] = [];
-  for (const [prefix, score] of [...counts.entries()]) {
+  const candidatePrefixes = new Set<string>();
+  const pushCandidate = (prefix: string, score: number, deviceId?: string) => {
+    if (candidatePrefixes.has(prefix)) {
+      return;
+    }
+    candidatePrefixes.add(prefix);
+
     if (!prefix.includes("c4004") && score < 4) {
-      continue;
+      return;
     }
 
-      const relatedStates = states.filter((state) => objectIdFromEntityId(state.entity_id).startsWith(`${prefix}_`));
-      const onlineState = relatedStates.find((state) => state.entity_id === toEntityId(prefix, entityDefinitions[0]));
-      const deviceId = selectDeviceIdForPrefix(prefix, entityRegistry, states);
-      const device = deviceId ? deviceRegistry.get(deviceId) : undefined;
-      const name = device ? getDeviceDisplayName(device) : undefined;
-      const manufacturer = device ? normalizeOptionalString(device.manufacturer) : undefined;
-      const model = device ? normalizeOptionalString(device.model) : undefined;
-      const firmwareVersion = device ? normalizeOptionalString(device.sw_version) : undefined;
-      if (!device && !prefix.toLowerCase().includes("c4004")) {
-        continue;
-      }
-      if (device && !isC4004RegistryDevice(device) && score < 4) {
-        continue;
-      }
-      candidates.push({
-        prefix,
-        score,
-        status: isOnlineStateValue(onlineState?.state) ? "online" : "offline",
-        deviceId,
-        deviceName: name ?? prefix,
-        manufacturer,
-        deviceModel: model ?? "DFRobot C4004",
-        firmwareVersion,
-        macAddress: extractMacFromDevice(device),
-        entityCount: relatedStates.length,
-      });
+    const resolvedDeviceId = deviceId ?? selectDeviceIdForPrefix(prefix, entityRegistry, states);
+    const relatedStates = resolveRelatedStates(prefix, resolvedDeviceId, entityRegistry, states);
+    const device = resolvedDeviceId ? deviceRegistry.get(resolvedDeviceId) : undefined;
+    const name = device ? getDeviceDisplayName(device) : undefined;
+    const manufacturer = device ? normalizeOptionalString(device.manufacturer) : undefined;
+    const model = device ? normalizeOptionalString(device.model) : undefined;
+    const firmwareVersion = device ? normalizeOptionalString(device.sw_version) : undefined;
+    const deploymentName = device ? getAreaDisplayName(device.area_id, areaRegistry) : undefined;
+    if (!device && !prefix.toLowerCase().includes("c4004")) {
+      return;
+    }
+    if (device && !isC4004RegistryDevice(device) && score < 4) {
+      return;
+    }
+    candidates.push({
+      prefix,
+      score,
+      status: resolveDeviceStatus(prefix, relatedStates),
+      deviceId: resolvedDeviceId,
+      deviceName: name ?? prefix,
+      deploymentName,
+      manufacturer,
+      deviceModel: model ?? "DFRobot C4004",
+      firmwareVersion,
+      macAddress: extractMacFromDevice(device),
+      entityCount: relatedStates.length,
+    });
+  };
+
+  for (const [prefix, score] of [...counts.entries()]) {
+    pushCandidate(prefix, score);
+  }
+
+  for (const device of deviceRegistryEntries) {
+    if (!isC4004RegistryDevice(device)) {
+      continue;
+    }
+    const prefix = getDevicePrefix(device);
+    if (!prefix) {
+      continue;
+    }
+    const score = counts.get(prefix) ?? 0;
+    pushCandidate(prefix, score, device.id);
   }
 
   return candidates.sort((left, right) => right.score - left.score || left.prefix.localeCompare(right.prefix));

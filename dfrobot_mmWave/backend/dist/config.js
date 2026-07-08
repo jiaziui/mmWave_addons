@@ -9,7 +9,7 @@ const node_path_1 = __importDefault(require("node:path"));
 const dotenv_1 = __importDefault(require("dotenv"));
 dotenv_1.default.config();
 const DEFAULT_PORT = 42069;
-const DEFAULT_HA_DATA_DIR = "/homeassistant/dfrobot_mmwave";
+const DEFAULT_HA_DATA_DIR = "/config/dfrobot_mmwave";
 const DEFAULT_FRONTEND_DIST = node_path_1.default.resolve(__dirname, "../../frontend/dist");
 const trimTrailingSlash = (value) => value.replace(/\/+$/, "");
 const parsePort = (value, fallback) => {

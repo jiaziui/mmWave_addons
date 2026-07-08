@@ -43,6 +43,10 @@ const isOnlineStateValue = (value) => {
     const normalized = normalizeStateValue(value);
     return normalized === "on" || normalized === "online" || normalized === "true";
 };
+const isAvailableStateValue = (value) => {
+    const normalized = normalizeStateValue(value);
+    return normalized !== "" && normalized !== "unknown" && normalized !== "unavailable";
+};
 const normalizeMacAddress = (value) => {
     if (typeof value !== "string") {
         return undefined;
@@ -74,6 +78,24 @@ const normalizeOptionalString = (value) => {
     return trimmed.length ? trimmed : undefined;
 };
 const getDeviceDisplayName = (device) => normalizeOptionalString(device.name_by_user) ?? normalizeOptionalString(device.name);
+const toDevicePrefix = (value) => {
+    const prefix = value
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9_]+/g, "_")
+        .replace(/^_+|_+$/g, "");
+    return prefix.includes("c4004") ? prefix : undefined;
+};
+const getDevicePrefix = (device) => {
+    const rawPrefix = normalizeOptionalString(device.name) ?? normalizeOptionalString(device.name_by_user);
+    return rawPrefix ? toDevicePrefix(rawPrefix) : undefined;
+};
+const getAreaDisplayName = (areaId, areaRegistry) => {
+    if (!areaId) {
+        return undefined;
+    }
+    return areaRegistry.get(areaId);
+};
 const isC4004RegistryDevice = (device) => {
     const combined = [device.name_by_user, device.name, device.manufacturer, device.model]
         .filter((value) => typeof value === "string")
@@ -120,11 +142,23 @@ const selectDeviceIdForPrefix = (prefix, entityRegistry, states) => {
     }
     return [...counts.entries()].sort((left, right) => right[1] - left[1])[0]?.[0];
 };
+const resolveRelatedStates = (prefix, deviceId, entityRegistry, states) => states.filter((state) => {
+    const objectId = objectIdFromEntityId(state.entity_id);
+    return objectId.startsWith(`${prefix}_`) || (deviceId && entityRegistry.get(state.entity_id)?.device_id === deviceId);
+});
+const resolveDeviceStatus = (prefix, relatedStates) => {
+    const onlineState = relatedStates.find((state) => state.entity_id === (0, exports.toEntityId)(prefix, entityDefinitions[0]));
+    if (onlineState) {
+        return isOnlineStateValue(onlineState.state) ? "online" : "offline";
+    }
+    return relatedStates.some((state) => isAvailableStateValue(state.state)) ? "online" : "offline";
+};
 const discoverC4004Devices = async (client) => {
-    const [states, entityRegistryEntries, deviceRegistryEntries] = await Promise.all([
+    const [states, entityRegistryEntries, deviceRegistryEntries, areaRegistryEntries] = await Promise.all([
         client.getAllStates(),
         client.getEntityRegistry(),
         client.getDeviceRegistry(),
+        client.getAreaRegistry(),
     ]);
     const matched = states.map(matchState).filter((entry) => Boolean(entry));
     const counts = new Map();
@@ -133,37 +167,58 @@ const discoverC4004Devices = async (client) => {
     }
     const entityRegistry = new Map(entityRegistryEntries.map((entry) => [entry.entity_id, entry]));
     const deviceRegistry = new Map(deviceRegistryEntries.map((entry) => [entry.id, entry]));
+    const areaRegistry = new Map(areaRegistryEntries.map((entry) => [entry.id, normalizeOptionalString(entry.name)]));
     const candidates = [];
-    for (const [prefix, score] of [...counts.entries()]) {
-        if (!prefix.includes("c4004") && score < 4) {
-            continue;
+    const candidatePrefixes = new Set();
+    const pushCandidate = (prefix, score, deviceId) => {
+        if (candidatePrefixes.has(prefix)) {
+            return;
         }
-        const relatedStates = states.filter((state) => objectIdFromEntityId(state.entity_id).startsWith(`${prefix}_`));
-        const onlineState = relatedStates.find((state) => state.entity_id === (0, exports.toEntityId)(prefix, entityDefinitions[0]));
-        const deviceId = selectDeviceIdForPrefix(prefix, entityRegistry, states);
-        const device = deviceId ? deviceRegistry.get(deviceId) : undefined;
+        candidatePrefixes.add(prefix);
+        if (!prefix.includes("c4004") && score < 4) {
+            return;
+        }
+        const resolvedDeviceId = deviceId ?? selectDeviceIdForPrefix(prefix, entityRegistry, states);
+        const relatedStates = resolveRelatedStates(prefix, resolvedDeviceId, entityRegistry, states);
+        const device = resolvedDeviceId ? deviceRegistry.get(resolvedDeviceId) : undefined;
         const name = device ? getDeviceDisplayName(device) : undefined;
         const manufacturer = device ? normalizeOptionalString(device.manufacturer) : undefined;
         const model = device ? normalizeOptionalString(device.model) : undefined;
         const firmwareVersion = device ? normalizeOptionalString(device.sw_version) : undefined;
+        const deploymentName = device ? getAreaDisplayName(device.area_id, areaRegistry) : undefined;
         if (!device && !prefix.toLowerCase().includes("c4004")) {
-            continue;
+            return;
         }
         if (device && !isC4004RegistryDevice(device) && score < 4) {
-            continue;
+            return;
         }
         candidates.push({
             prefix,
             score,
-            status: isOnlineStateValue(onlineState?.state) ? "online" : "offline",
-            deviceId,
+            status: resolveDeviceStatus(prefix, relatedStates),
+            deviceId: resolvedDeviceId,
             deviceName: name ?? prefix,
+            deploymentName,
             manufacturer,
             deviceModel: model ?? "DFRobot C4004",
             firmwareVersion,
             macAddress: extractMacFromDevice(device),
             entityCount: relatedStates.length,
         });
+    };
+    for (const [prefix, score] of [...counts.entries()]) {
+        pushCandidate(prefix, score);
+    }
+    for (const device of deviceRegistryEntries) {
+        if (!isC4004RegistryDevice(device)) {
+            continue;
+        }
+        const prefix = getDevicePrefix(device);
+        if (!prefix) {
+            continue;
+        }
+        const score = counts.get(prefix) ?? 0;
+        pushCandidate(prefix, score, device.id);
     }
     return candidates.sort((left, right) => right.score - left.score || left.prefix.localeCompare(right.prefix));
 };

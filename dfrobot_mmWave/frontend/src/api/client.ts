@@ -1,8 +1,11 @@
 export interface StoredMmwaveDevice {
   id: string;
+  deviceNo?: string;
+  initialized: boolean;
   profileId: "c4004";
   haDeviceId?: string;
   name: string;
+  deploymentName?: string;
   model: string;
   manufacturer?: string;
   firmwareVersion?: string;
@@ -13,6 +16,12 @@ export interface StoredMmwaveDevice {
   binding: {
     entityCount: number;
   };
+  installInfo?: {
+    installMode: "side";
+    installAngleDeg: 0;
+    installHeightM: number;
+  };
+  detectionMode?: "high_sensitivity" | "static_stable";
   discovery: {
     status: "online" | "offline";
     signal: number;
@@ -188,6 +197,34 @@ export const resetDevice = async (
   handle(
     await fetch(ingressAware(`api/mmwave/devices/${encodeURIComponent(deviceId)}/actions/reset`), {
       method: "POST",
+    }),
+  );
+
+export const unbindDevice = async (
+  deviceId: string,
+): Promise<{ ok: boolean; devices: StoredMmwaveDevice[] }> =>
+  handle(
+    await fetch(ingressAware(`api/mmwave/devices/${encodeURIComponent(deviceId)}/actions/unbind`), {
+      method: "POST",
+    }),
+  );
+
+export const initializeDevice = async (
+  deviceId: string,
+  payload: {
+    deviceNoMode: "auto" | "custom";
+    customDeviceNo?: string;
+    installHeightM: number;
+    detectionMode: "high_sensitivity" | "static_stable";
+  },
+): Promise<{ ok: boolean; device: StoredMmwaveDevice }> =>
+  handle(
+    await fetch(ingressAware(`api/mmwave/devices/${encodeURIComponent(deviceId)}/actions/initialize`), {
+      method: "POST",
+      body: JSON.stringify(payload),
+      headers: {
+        "Content-Type": "application/json",
+      },
     }),
   );
 

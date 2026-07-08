@@ -20,6 +20,11 @@ export interface HaEntityRegistryEntry {
   disabled_by?: string | null;
 }
 
+export interface HaAreaRegistryEntry {
+  id: string;
+  name: string | null;
+}
+
 export interface HaDeviceRegistryEntry {
   id: string;
   name: string | null;

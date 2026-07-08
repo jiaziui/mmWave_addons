@@ -72,6 +72,24 @@ class HaClient {
             return this.asArray(JSON.parse(rendered));
         }
     }
+    async getAreaRegistry() {
+        try {
+            return this.asArray(await this.request("/config/area_registry"));
+        }
+        catch {
+            const template = `
+{% set items = namespace(list=[]) %}
+{% for area_id in areas() %}
+  {% set items.list = items.list + [{
+    'id': area_id,
+    'name': area_name(area_id)
+  }] %}
+{% endfor %}
+{{ items.list | tojson }}`.trim();
+            const rendered = await this.renderTemplate(template);
+            return this.asArray(JSON.parse(rendered));
+        }
+    }
     async callService(domain, service, data) {
         return this.request(`/services/${domain}/${service}`, {
             method: "POST",

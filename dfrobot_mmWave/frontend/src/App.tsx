@@ -6,8 +6,10 @@ import {
   fetchDevices,
   fetchMeta,
   fetchOverview,
+  initializeDevice as submitInitializeDevice,
   refreshDevice,
   resetDevice,
+  unbindDevice,
   type MetaConfig,
   type MmwaveDeviceDetail,
   type MmwaveOverviewDeviceCard,
@@ -19,6 +21,21 @@ import {
 } from "./api/client";
 
 type View = "overview" | "detail" | "device-management" | "region-management";
+type DeviceNoMode = "auto" | "custom";
+type DetectionMode = "high_sensitivity" | "static_stable";
+
+type InitializeWizardState = {
+  deviceId: string;
+  name: string;
+  deploymentName: string;
+  deviceNoMode: DeviceNoMode;
+  customDeviceNo: string;
+  installHeightM: number;
+  detectionMode: DetectionMode;
+  step: 1 | 2 | 3;
+  submitting: boolean;
+  completed: boolean;
+};
 
 const navItems: Array<{ id: Exclude<View, "detail">; label: string; short: string }> = [
   { id: "overview", label: "设备总览", short: "OV" },
@@ -32,6 +49,21 @@ const statsMeta = [
   { key: "targetCount", label: "当前运动总人数", suffix: "人" },
   { key: "staticCount", label: "当前静止总人数", suffix: "人" },
 ] as const;
+
+const detectionModeLabels: Record<DetectionMode, { title: string; description: string; frames: number; unmannedTime: number }> = {
+  high_sensitivity: {
+    title: "高灵敏度模式",
+    description: "快速响应，适合需要更快触发的场景。",
+    frames: 2,
+    unmannedTime: 5,
+  },
+  static_stable: {
+    title: "静态稳定模式",
+    description: "持续存在，适合静止目标稳定检测。",
+    frames: 7,
+    unmannedTime: 30,
+  },
+};
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
@@ -122,6 +154,7 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string>("");
   const [error, setError] = useState<string>("");
+  const [initializeWizard, setInitializeWizard] = useState<InitializeWizardState | null>(null);
 
   const selectedDevice = useMemo(
     () => devices.find((device) => device.id === selectedDeviceId) ?? null,
@@ -296,13 +329,8 @@ function App() {
 
   const activeNav = view === "detail" ? "overview" : view;
 
-  const getDeviceUiStatus = (device: StoredMmwaveDevice): "ONLINE" | "OFFLINE" | "UNINITIALIZED" => {
-    const initialized = Boolean(device.haDeviceId && device.binding.entityCount > 0);
-    if (!initialized) {
-      return "UNINITIALIZED";
-    }
-    return device.discovery.status === "online" ? "ONLINE" : "OFFLINE";
-  };
+  const getDeviceUiStatus = (device: StoredMmwaveDevice): "ONLINE" | "OFFLINE" =>
+    device.discovery.status === "online" ? "ONLINE" : "OFFLINE";
 
   const getDeviceTypeLabel = (device: StoredMmwaveDevice): string => {
     if (device.profileId === "c4004") {
@@ -311,22 +339,141 @@ function App() {
     return device.model.trim().toLowerCase().replace(/\s+/g, "_");
   };
 
-  const getDeviceDeploymentLabel = (device: StoredMmwaveDevice): string => device.id;
+  const getDeviceDeploymentLabel = (device: StoredMmwaveDevice): string => device.deploymentName?.trim() || "未设置";
+
+  const normalizeDeviceNoInput = (value: string): string =>
+    value.replace(/\D+/g, "").replace(/^0+(\d)/, "$1");
+
+  const getSuggestedDeviceNo = (): string => {
+    const maxSequence = devices.reduce((max, device) => {
+      const parsed = Number(normalizeDeviceNoInput(device.deviceNo ?? ""));
+      return Number.isSafeInteger(parsed) && parsed > 0 ? Math.max(max, parsed) : max;
+    }, 0);
+    return String(maxSequence + 1);
+  };
+
+  const getWizardDeviceNo = (wizard: InitializeWizardState): string =>
+    wizard.deviceNoMode === "auto" ? getSuggestedDeviceNo() : normalizeDeviceNoInput(wizard.customDeviceNo);
+
+  const isDuplicateDeviceNo = (deviceNo: string, currentDeviceId: string): boolean =>
+    devices.some((device) => device.id !== currentDeviceId && device.deviceNo === deviceNo);
 
   const handleInitializeDevice = (device: StoredMmwaveDevice) => {
     setError("");
-    setMessage("设备 " + device.name + " 的初始化接口暂未接入");
+    setInitializeWizard({
+      deviceId: device.id,
+      name: device.name,
+      deploymentName: device.deploymentName ?? "",
+      deviceNoMode: "auto",
+      customDeviceNo: "",
+      installHeightM: device.installInfo?.installHeightM ?? 1.8,
+      detectionMode: device.detectionMode ?? "high_sensitivity",
+      step: 1,
+      submitting: false,
+      completed: false,
+    });
   };
 
-  const handleDeleteDevice = (device: StoredMmwaveDevice) => {
+  const handleDeleteDevice = async (device: StoredMmwaveDevice) => {
     setError("");
-    setMessage("设备 " + device.name + " 的删除接口暂未接入");
+    setMessage("");
+    const confirmed = window.confirm(
+      `确认取消绑定设备 ${device.name}？这会删除该设备的本地配置、区域配置和快照缓存。`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      setBusy(true);
+      const response = await unbindDevice(device.id);
+      setDevices(response.devices);
+      if (selectedDeviceId === device.id) {
+        setSelectedDeviceId(null);
+        setDetail(null);
+      }
+      await loadOverview();
+      setMessage("设备 " + device.name + " 已取消绑定");
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "取消绑定失败");
+    } finally {
+      setBusy(false);
+    }
   };
+
+  const deviceManagementDevices = devices;
 
   const deviceManagementStats = {
-    scanResultCount: devices.length,
-    onlineCount: devices.filter((device) => getDeviceUiStatus(device) === "ONLINE").length,
-    uninitializedCount: devices.filter((device) => getDeviceUiStatus(device) === "UNINITIALIZED").length,
+    scanResultCount: deviceManagementDevices.length,
+    onlineCount: deviceManagementDevices.filter((device) => getDeviceUiStatus(device) === "ONLINE").length,
+    uninitializedCount: deviceManagementDevices.filter((device) => !device.initialized).length,
+  };
+
+  const closeInitializeWizard = () => {
+    setInitializeWizard(null);
+  };
+
+  const updateInitializeWizard = (updates: Partial<InitializeWizardState>) => {
+    setInitializeWizard((current) => (current ? { ...current, ...updates } : current));
+  };
+
+  const handleInitializeStepOneNext = () => {
+    if (!initializeWizard) {
+      return;
+    }
+    const deviceNo = getWizardDeviceNo(initializeWizard);
+    if (!deviceNo) {
+      setError("请输入设备号");
+      return;
+    }
+    if (isDuplicateDeviceNo(deviceNo, initializeWizard.deviceId)) {
+      setError("设备号已存在，请更换后再继续");
+      return;
+    }
+    setError("");
+    updateInitializeWizard({
+      customDeviceNo: initializeWizard.deviceNoMode === "custom" ? deviceNo : initializeWizard.customDeviceNo,
+      step: 2,
+    });
+  };
+
+  const handleSubmitInitializeWizard = async () => {
+    if (!initializeWizard) {
+      return;
+    }
+
+    try {
+      updateInitializeWizard({ submitting: true });
+      setError("");
+      const response = await submitInitializeDevice(initializeWizard.deviceId, {
+        deviceNoMode: initializeWizard.deviceNoMode,
+        customDeviceNo:
+          initializeWizard.deviceNoMode === "custom"
+            ? normalizeDeviceNoInput(initializeWizard.customDeviceNo)
+            : undefined,
+        installHeightM: initializeWizard.installHeightM,
+        detectionMode: initializeWizard.detectionMode,
+      });
+      const refreshed = await fetchDevices();
+      setDevices(refreshed.devices);
+      setInitializeWizard((current) =>
+        current
+          ? {
+              ...current,
+              step: 3,
+              submitting: false,
+              completed: true,
+              name: response.device.name,
+              deploymentName: response.device.deploymentName ?? current.deploymentName,
+              customDeviceNo: response.device.deviceNo ?? current.customDeviceNo,
+            }
+          : current,
+      );
+      setMessage("设备 " + response.device.name + " 已完成绑定");
+    } catch (nextError) {
+      updateInitializeWizard({ submitting: false });
+      setError(nextError instanceof Error ? nextError.message : "绑定失败");
+    }
   };
 
   const renderWelcome = () => (
@@ -580,35 +727,31 @@ function App() {
         </article>
       </div>
       <section className="panel">
-        <div className="placeholder-copy">
-          <strong>扫描设备后，以表格形式展示设备信息与操作入口。</strong>
-          <span>当前按设备名称、部署、设备ID、设备类型、设备状态和操作六列展示。</span>
-        </div>
         <div className="device-table-wrap">
-          {devices.length ? (
+          {deviceManagementDevices.length ? (
             <table className="device-table">
               <thead>
                 <tr>
                   <th>设备名称</th>
                   <th>部署</th>
-                  <th>设备ID</th>
+                  <th>设备号</th>
                   <th>设备类型</th>
                   <th>设备状态</th>
                   <th>操作</th>
                 </tr>
               </thead>
               <tbody>
-                {devices.map((device) => {
+                {deviceManagementDevices.map((device) => {
                   const status = getDeviceUiStatus(device);
-                  const canViewDetail = status === "ONLINE";
-                  const canDelete = status === "ONLINE" || status === "OFFLINE";
-                  const canInitialize = status === "UNINITIALIZED";
+                  const canViewDetail = device.initialized && status === "ONLINE";
+                  const canDelete = device.initialized;
+                  const canInitialize = !device.initialized;
 
                   return (
                     <tr key={device.id}>
                       <td>{device.name}</td>
                       <td>{getDeviceDeploymentLabel(device)}</td>
-                      <td>{device.haDeviceId ?? device.prefix}</td>
+                      <td>{device.deviceNo ?? "-"}</td>
                       <td>{getDeviceTypeLabel(device)}</td>
                       <td>
                         <span className={"device-status-badge device-status-" + status.toLowerCase()}>{status}</span>
@@ -626,8 +769,8 @@ function App() {
                             </button>
                           ) : null}
                           {canDelete ? (
-                            <button type="button" className="table-action-button danger" onClick={() => handleDeleteDevice(device)}>
-                              删除
+                            <button type="button" className="table-action-button danger" onClick={() => void handleDeleteDevice(device)} disabled={busy}>
+                              取消绑定
                             </button>
                           ) : null}
                         </div>
@@ -681,6 +824,171 @@ function App() {
         {view === "device-management" ? renderDeviceManagement() : null}
         {view === "region-management" ? renderRegionManagement() : null}
       </main>
+      {initializeWizard ? (
+        <div className="modal-backdrop" role="presentation" onClick={closeInitializeWizard}>
+          <section className="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="initialize-device-title" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <div>
+                <p className="eyebrow">Device Binding</p>
+                <h3 id="initialize-device-title">初始化设备</h3>
+              </div>
+              <button type="button" className="modal-close" onClick={closeInitializeWizard}>
+                关闭
+              </button>
+            </div>
+            <div className="wizard-steps">
+              <span className={initializeWizard.step >= 1 ? "wizard-step wizard-step-active" : "wizard-step"}>1. 绑定设备</span>
+              <span className={initializeWizard.step >= 2 ? "wizard-step wizard-step-active" : "wizard-step"}>2. 安装设备</span>
+              <span className={initializeWizard.step >= 3 ? "wizard-step wizard-step-active" : "wizard-step"}>3. 探测模式</span>
+            </div>
+            {initializeWizard.step === 1 ? (
+              <div className="modal-body">
+                <div className="wizard-summary">
+                  <div>
+                    <span>设备名称</span>
+                    <strong>{initializeWizard.name || "未设置"}</strong>
+                  </div>
+                  <div>
+                    <span>部署位置</span>
+                    <strong>{initializeWizard.deploymentName || "未设置"}</strong>
+                  </div>
+                </div>
+                <div className="segmented-control" role="group" aria-label="设备号生成方式">
+                  <button
+                    type="button"
+                    className={initializeWizard.deviceNoMode === "auto" ? "segment-button segment-button-active" : "segment-button"}
+                    onClick={() => updateInitializeWizard({ deviceNoMode: "auto" })}
+                  >
+                    自动生成
+                  </button>
+                  <button
+                    type="button"
+                    className={initializeWizard.deviceNoMode === "custom" ? "segment-button segment-button-active" : "segment-button"}
+                    onClick={() => updateInitializeWizard({ deviceNoMode: "custom" })}
+                  >
+                    自定义
+                  </button>
+                </div>
+                {initializeWizard.deviceNoMode === "custom" ? (
+                  <label className="modal-field">
+                    <span>设备号</span>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      value={initializeWizard.customDeviceNo}
+                      onChange={(event) => updateInitializeWizard({ customDeviceNo: normalizeDeviceNoInput(event.target.value) })}
+                      placeholder="例如：1"
+                    />
+                  </label>
+                ) : (
+                  <div className="readonly-field">
+                    <span>设备号</span>
+                    <strong>{getSuggestedDeviceNo()}</strong>
+                  </div>
+                )}
+              </div>
+            ) : null}
+            {initializeWizard.step === 2 ? (
+              <div className="modal-body">
+                <div className="wizard-summary">
+                  <div>
+                    <span>安装方式</span>
+                    <strong>侧装</strong>
+                  </div>
+                  <div>
+                    <span>安装角度</span>
+                    <strong>0°</strong>
+                  </div>
+                </div>
+                <label className="modal-field range-field">
+                  <span>安装高度</span>
+                  <strong>{initializeWizard.installHeightM.toFixed(2)} m</strong>
+                  <input
+                    type="range"
+                    min="1.8"
+                    max="2"
+                    step="0.01"
+                    value={initializeWizard.installHeightM}
+                    onChange={(event) => updateInitializeWizard({ installHeightM: Number(event.target.value) })}
+                  />
+                  <small>1.8m - 2.0m</small>
+                </label>
+              </div>
+            ) : null}
+            {initializeWizard.step === 3 ? (
+              <div className="modal-body">
+                <div className="mode-options">
+                  {(Object.keys(detectionModeLabels) as DetectionMode[]).map((mode) => {
+                    const modeMeta = detectionModeLabels[mode];
+                    return (
+                      <button
+                        key={mode}
+                        type="button"
+                        className={initializeWizard.detectionMode === mode ? "mode-option mode-option-active" : "mode-option"}
+                        onClick={() => updateInitializeWizard({ detectionMode: mode })}
+                      >
+                        <strong>{modeMeta.title}</strong>
+                        <span>{modeMeta.description}</span>
+                        <small>
+                          确认帧数 {modeMeta.frames} / 无人时间 {modeMeta.unmannedTime}s
+                        </small>
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="wizard-success">
+                  <strong>{initializeWizard.completed ? "绑定完成" : "绑定确认"}</strong>
+                  <span>设备号：{getWizardDeviceNo(initializeWizard)}</span>
+                  <span>安装高度：{initializeWizard.installHeightM.toFixed(2)} m</span>
+                </div>
+              </div>
+            ) : null}
+            <div className="modal-actions">
+              {initializeWizard.step === 1 ? (
+                <>
+                  <button type="button" className="table-action-button" onClick={closeInitializeWizard}>
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    className="table-action-button primary"
+                    onClick={handleInitializeStepOneNext}
+                    disabled={initializeWizard.deviceNoMode === "custom" && !initializeWizard.customDeviceNo.trim()}
+                  >
+                    下一步
+                  </button>
+                </>
+              ) : null}
+              {initializeWizard.step === 2 ? (
+                <>
+                  <button type="button" className="table-action-button" onClick={() => updateInitializeWizard({ step: 1 })} disabled={initializeWizard.submitting}>
+                    上一步
+                  </button>
+                  <button type="button" className="table-action-button primary" onClick={() => updateInitializeWizard({ step: 3 })} disabled={initializeWizard.submitting}>
+                    下一步
+                  </button>
+                </>
+              ) : null}
+              {initializeWizard.step === 3 ? (
+                initializeWizard.completed ? (
+                  <button type="button" className="table-action-button primary" onClick={closeInitializeWizard}>
+                    完成
+                  </button>
+                ) : (
+                  <>
+                    <button type="button" className="table-action-button" onClick={() => updateInitializeWizard({ step: 2 })} disabled={initializeWizard.submitting}>
+                      上一步
+                    </button>
+                    <button type="button" className="table-action-button primary" onClick={() => void handleSubmitInitializeWizard()} disabled={initializeWizard.submitting}>
+                      {initializeWizard.submitting ? "绑定中..." : "确认绑定"}
+                    </button>
+                  </>
+                )
+              ) : null}
+            </div>
+          </section>
+        </div>
+      ) : null}
     </div>
   );
 }

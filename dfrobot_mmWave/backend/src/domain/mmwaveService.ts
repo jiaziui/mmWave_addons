@@ -1,5 +1,5 @@
 import type { Logger } from "pino";
-import { DeviceStorage, type StoredMmwaveDevice } from "../config/storage";
+import { DeviceStorage, type DetectionMode, type InitializeDeviceInput, type StoredMmwaveDevice } from "../config/storage";
 import { discoverC4004Devices, findWritableEntityId, toEntityId, writeC4004Entity } from "./c4004Profile";
 import type { HaClient } from "../ha/client";
 import type { HaEntityState } from "../ha/types";
@@ -27,6 +27,17 @@ const REGION_POSITIONS = [
   { x: 0, y: 1.8 },
 ];
 
+const DETECTION_MODE_PARAMS: Record<DetectionMode, { checkToActiveFrames: number; unmannedTime: number }> = {
+  high_sensitivity: {
+    checkToActiveFrames: 2,
+    unmannedTime: 5,
+  },
+  static_stable: {
+    checkToActiveFrames: 7,
+    unmannedTime: 30,
+  },
+};
+
 const normalizeState = (value: string | null | undefined): string => (value ? value.toLowerCase() : "");
 
 const isTruthyState = (value: string | null | undefined): boolean => {
@@ -38,6 +49,8 @@ const isUnavailable = (value: string | null | undefined): boolean => {
   const normalized = normalizeState(value);
   return normalized === "unknown" || normalized === "unavailable" || normalized === "";
 };
+
+const isAvailableState = (value: string | null | undefined): boolean => !isUnavailable(value);
 
 const toNumber = (value: string | null | undefined): number | null => {
   if (!value || isUnavailable(value)) {
@@ -63,6 +76,22 @@ const readString = (statesById: Map<string, HaEntityState>, entityId: string): s
 
 const readNumber = (statesById: Map<string, HaEntityState>, entityId: string): number | null =>
   toNumber(readString(statesById, entityId));
+
+const objectIdFromEntityId = (entityId: string): string => entityId.split(".", 2)[1] ?? "";
+
+const resolveDeviceOnline = (
+  device: StoredMmwaveDevice,
+  statesById: Map<string, HaEntityState>,
+  states: HaEntityState[],
+): boolean => {
+  const onlineState = readString(statesById, `binary_sensor.${device.prefix}_online`);
+  if (onlineState !== null) {
+    return isTruthyState(onlineState);
+  }
+  return states.some(
+    (state) => objectIdFromEntityId(state.entity_id).startsWith(`${device.prefix}_`) && isAvailableState(state.state),
+  );
+};
 
 const cloneRangeBox = (rangeBox: RangeBox): RangeBox => ({ ...rangeBox });
 
@@ -224,6 +253,7 @@ export class MmwaveService {
       candidates.map((candidate) => ({
         haDeviceId: candidate.deviceId,
         name: candidate.deviceName ?? candidate.prefix,
+        deploymentName: candidate.deploymentName,
         model: candidate.deviceModel ?? "DFRobot C4004",
         manufacturer: candidate.manufacturer,
         firmwareVersion: candidate.firmwareVersion,
@@ -236,14 +266,33 @@ export class MmwaveService {
         macAddress: candidate.macAddress,
       })),
     );
-    this.mqttBridge.setDevices(devices);
+    this.mqttBridge.setDevices(devices.filter((device) => device.initialized));
     return devices;
   }
 
-  listDevices(): StoredMmwaveDevice[] {
-    const devices = this.storage.listDevices();
-    this.mqttBridge.setDevices(devices);
+  async listDevices(): Promise<StoredMmwaveDevice[]> {
+    const devices = await this.refreshDeviceStatuses();
+    this.mqttBridge.setDevices(devices.filter((device) => device.initialized));
     return devices;
+  }
+
+  private async refreshDeviceStatuses(): Promise<StoredMmwaveDevice[]> {
+    const devices = this.storage.listDevices();
+    if (!this.haClient || !devices.length) {
+      return devices;
+    }
+
+    const states = await this.haClient.getAllStates();
+    const statesById = new Map(states.map((state) => [state.entity_id, state]));
+    const statusesByPrefix = new Map<string, "online" | "offline">();
+    for (const device of devices) {
+      statusesByPrefix.set(
+        device.prefix,
+        resolveDeviceOnline(device, statesById, states) ? "online" : "offline",
+      );
+    }
+
+    return this.storage.updateDiscoveryStatuses(statusesByPrefix);
   }
 
   isMqttConnected(): boolean {
@@ -266,7 +315,7 @@ export class MmwaveService {
   }
 
   async getOverview(): Promise<MmwaveOverviewResponse> {
-    const devices = this.listDevices();
+    const devices = (await this.listDevices()).filter((device) => device.initialized);
     if (!this.haClient || !devices.length) {
       return { ok: true, metrics: buildMetrics([]), devices: [] };
     }
@@ -397,6 +446,32 @@ export class MmwaveService {
 
     await writeC4004Entity(this.haClient, device.prefix, "reset");
     return this.getDeviceDetail(deviceId);
+  }
+
+  async initializeDevice(
+    deviceId: string,
+    payload: InitializeDeviceInput,
+  ): Promise<StoredMmwaveDevice> {
+    const current = this.storage.validateInitializeDevice(deviceId, payload);
+    if (!this.haClient) {
+      throw new Error("Home Assistant is not linked");
+    }
+
+    const modeParams = DETECTION_MODE_PARAMS[payload.detectionMode];
+    await writeC4004Entity(this.haClient, current.prefix, "installHeight", Math.round(payload.installHeightM * 100));
+    await writeC4004Entity(this.haClient, current.prefix, "checkToActiveFrames", modeParams.checkToActiveFrames);
+    await writeC4004Entity(this.haClient, current.prefix, "unmannedTime", modeParams.unmannedTime);
+
+    const device = this.storage.initializeDevice(deviceId, payload);
+    this.mqttBridge.setDevices(this.storage.listDevices().filter((storedDevice) => storedDevice.initialized));
+    return device;
+  }
+
+  async unbindDevice(deviceId: string): Promise<StoredMmwaveDevice[]> {
+    this.storage.unbindDevice(deviceId);
+    const devices = this.haClient ? await this.discoverDevices() : this.storage.listDevices();
+    this.mqttBridge.setDevices(devices.filter((device) => device.initialized));
+    return devices;
   }
 
   handleTrajectorySnapshot(_deviceId: string, _snapshot: TrajectorySnapshot): void {

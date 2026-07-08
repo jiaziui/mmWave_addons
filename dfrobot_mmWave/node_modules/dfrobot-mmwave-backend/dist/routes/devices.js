@@ -2,6 +2,26 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.createMmwaveRouter = void 0;
 const express_1 = require("express");
+const isDetectionMode = (value) => value === "high_sensitivity" || value === "static_stable";
+const toInstallHeightM = (value) => {
+    const parsed = typeof value === "number" ? value : Number(value);
+    if (!Number.isFinite(parsed)) {
+        return 1.8;
+    }
+    return Math.round(Math.max(1.8, Math.min(2, parsed)) * 100) / 100;
+};
+const toInitializeStatus = (message) => {
+    if (message === "Device not found") {
+        return 404;
+    }
+    if (message === "Device number already exists") {
+        return 409;
+    }
+    if (message === "Home Assistant is not linked") {
+        return 424;
+    }
+    return 502;
+};
 const createMmwaveRouter = (service) => {
     const router = (0, express_1.Router)();
     router.get("/devices/discover", async (_req, res) => {
@@ -16,8 +36,16 @@ const createMmwaveRouter = (service) => {
             });
         }
     });
-    router.get("/devices", (_req, res) => {
-        res.json({ ok: true, devices: service.listDevices() });
+    router.get("/devices", async (_req, res) => {
+        try {
+            res.json({ ok: true, devices: await service.listDevices() });
+        }
+        catch (error) {
+            res.status(502).json({
+                ok: false,
+                error: error instanceof Error ? error.message : "Failed to list devices",
+            });
+        }
     });
     router.get("/overview", async (_req, res) => {
         try {
@@ -55,6 +83,32 @@ const createMmwaveRouter = (service) => {
         catch (error) {
             const message = error instanceof Error ? error.message : "Failed to reset device";
             res.status(message === "Device not found" ? 404 : 502).json({ ok: false, error: message });
+        }
+    });
+    router.post("/devices/:deviceId/actions/unbind", async (req, res) => {
+        try {
+            res.json({ ok: true, devices: await service.unbindDevice(req.params.deviceId) });
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : "Failed to unbind device";
+            res.status(message === "Device not found" ? 404 : 502).json({ ok: false, error: message });
+        }
+    });
+    router.post("/devices/:deviceId/actions/initialize", async (req, res) => {
+        try {
+            res.json({
+                ok: true,
+                device: await service.initializeDevice(req.params.deviceId, {
+                    deviceNoMode: req.body?.deviceNoMode === "custom" ? "custom" : "auto",
+                    customDeviceNo: typeof req.body?.customDeviceNo === "string" ? req.body.customDeviceNo : undefined,
+                    installHeightM: toInstallHeightM(req.body?.installHeightM),
+                    detectionMode: isDetectionMode(req.body?.detectionMode) ? req.body.detectionMode : "high_sensitivity",
+                }),
+            });
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : "Failed to initialize device";
+            res.status(toInitializeStatus(message)).json({ ok: false, error: message });
         }
     });
     return router;
