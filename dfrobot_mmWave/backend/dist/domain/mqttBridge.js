@@ -5,6 +5,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.MqttBridge = void 0;
 const mqtt_1 = __importDefault(require("mqtt"));
+const registry_1 = require("./profiles/registry");
 const trajectory_1 = require("./trajectory");
 class MqttBridge {
     constructor(config, logger, onSnapshot) {
@@ -12,7 +13,6 @@ class MqttBridge {
         this.logger = logger;
         this.onSnapshot = onSnapshot;
         this.client = null;
-        this.snapshots = new Map();
         this.subscriptions = new Set();
         this.connected = false;
         this.devices = [];
@@ -51,16 +51,12 @@ class MqttBridge {
             if (!device) {
                 return;
             }
-            this.snapshots.set(device.id, snapshot);
             this.onSnapshot?.(device.id, snapshot);
         });
     }
     setDevices(devices) {
         this.devices = devices;
         this.syncSubscriptions();
-    }
-    getSnapshot(deviceId) {
-        return this.snapshots.get(deviceId) ?? null;
     }
     isConnected() {
         return this.connected;
@@ -73,7 +69,11 @@ class MqttBridge {
             return;
         }
         for (const device of this.devices) {
-            const topic = `${device.mqttTopicPrefix}/dfrobot_c4004/${device.mqttKey}/state/target_trajectory`;
+            const profile = (0, registry_1.getMmwaveProfile)(device.profileId);
+            const topic = profile?.getTrajectoryTopic?.(device);
+            if (!topic) {
+                continue;
+            }
             if (this.subscriptions.has(topic)) {
                 continue;
             }

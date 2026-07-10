@@ -2,12 +2,12 @@ import mqtt, { MqttClient } from "mqtt";
 import type { Logger } from "pino";
 import type { MqttConfig } from "../config";
 import type { StoredMmwaveDevice } from "../config/storage";
+import { getMmwaveProfile } from "./profiles/registry";
 import { parseTrajectorySnapshot } from "./trajectory";
 import type { TrajectorySnapshot } from "../types/mmwave";
 
 export class MqttBridge {
   private client: MqttClient | null = null;
-  private readonly snapshots = new Map<string, TrajectorySnapshot>();
   private readonly subscriptions = new Set<string>();
   private connected = false;
   private devices: StoredMmwaveDevice[] = [];
@@ -62,7 +62,6 @@ export class MqttBridge {
         return;
       }
 
-      this.snapshots.set(device.id, snapshot);
       this.onSnapshot?.(device.id, snapshot);
     });
   }
@@ -70,10 +69,6 @@ export class MqttBridge {
   setDevices(devices: StoredMmwaveDevice[]): void {
     this.devices = devices;
     this.syncSubscriptions();
-  }
-
-  getSnapshot(deviceId: string): TrajectorySnapshot | null {
-    return this.snapshots.get(deviceId) ?? null;
   }
 
   isConnected(): boolean {
@@ -90,7 +85,11 @@ export class MqttBridge {
     }
 
     for (const device of this.devices) {
-      const topic = `${device.mqttTopicPrefix}/dfrobot_c4004/${device.mqttKey}/state/target_trajectory`;
+      const profile = getMmwaveProfile(device.profileId);
+      const topic = profile?.getTrajectoryTopic?.(device);
+      if (!topic) {
+        continue;
+      }
       if (this.subscriptions.has(topic)) {
         continue;
       }

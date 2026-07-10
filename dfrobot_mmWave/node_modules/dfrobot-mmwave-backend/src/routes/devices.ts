@@ -1,8 +1,17 @@
 import { Router } from "express";
 import type { MmwaveService } from "../domain/mmwaveService";
+import type { C4004DeviceSettings } from "../types/mmwave";
 
-const isDetectionMode = (value: unknown): value is "high_sensitivity" | "static_stable" =>
-  value === "high_sensitivity" || value === "static_stable";
+const parseDetectionMode = (value: unknown): 1 | 2 | null => {
+  if (value === "high_sensitivity") {
+    return 1;
+  }
+  if (value === "static_stable") {
+    return 2;
+  }
+  const parsed = typeof value === "number" ? value : Number(value);
+  return parsed === 1 || parsed === 2 ? parsed : null;
+};
 
 const toInstallHeightM = (value: unknown): number => {
   const parsed = typeof value === "number" ? value : Number(value);
@@ -22,7 +31,87 @@ const toInitializeStatus = (message: string): number => {
   if (message === "Home Assistant is not linked") {
     return 424;
   }
+  if (message === "Invalid detection mode") {
+    return 400;
+  }
   return 502;
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const toConfigStatus = (message: string): number => {
+  if (message === "Device not found") {
+    return 404;
+  }
+  if (message === "Home Assistant is not linked") {
+    return 424;
+  }
+  if (message === "Device profile does not support config yet") {
+    return 400;
+  }
+  return 502;
+};
+
+const parseOptionalBoolean = (value: unknown): boolean | undefined => {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "on" || normalized === "true" || normalized === "1") {
+    return true;
+  }
+  if (normalized === "off" || normalized === "false" || normalized === "0") {
+    return false;
+  }
+  return undefined;
+};
+
+const parseOptionalNumber = (value: unknown): number | undefined => {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+};
+
+const parseDeviceSettings = (value: unknown): C4004DeviceSettings | null => {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const settings: C4004DeviceSettings = {};
+  const booleanKeys = ["presenceEnable", "trajectoryTrackEnable", "trajectoryLed", "motionLed"] as const;
+  const numberKeys = [
+    "installZAngle",
+    "realTimePeopleTime",
+    "trackMeters",
+    "trackExistsTime",
+    "checkToActiveFrames",
+    "unmannedTime",
+    "zone1McuIo",
+    "zone2McuIo",
+    "zone3McuIo",
+    "zone4McuIo",
+    "zone5McuIo",
+    "zone6McuIo",
+  ] as const;
+
+  for (const key of booleanKeys) {
+    const parsed = parseOptionalBoolean(value[key]);
+    if (parsed !== undefined) {
+      settings[key] = parsed;
+    }
+  }
+
+  for (const key of numberKeys) {
+    const parsed = parseOptionalNumber(value[key]);
+    if (parsed !== undefined) {
+      settings[key] = parsed;
+    }
+  }
+
+  return Object.keys(settings).length ? settings : null;
 };
 
 export const createMmwaveRouter = (service: MmwaveService): Router => {
@@ -71,6 +160,30 @@ export const createMmwaveRouter = (service: MmwaveService): Router => {
     }
   });
 
+  router.get("/devices/:deviceId/config", async (req, res) => {
+    try {
+      res.json({ ok: true, config: await service.getDeviceConfig(req.params.deviceId) });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to load device config";
+      res.status(toConfigStatus(message)).json({ ok: false, error: message });
+    }
+  });
+
+  router.put("/devices/:deviceId/config", async (req, res) => {
+    try {
+      const rawSettings = req.body?.deviceSettings ?? req.body?.settings ?? req.body;
+      const settings = parseDeviceSettings(rawSettings);
+      if (!settings) {
+        res.status(400).json({ ok: false, error: "No valid device settings provided" });
+        return;
+      }
+      res.json({ ok: true, config: await service.updateDeviceConfig(req.params.deviceId, settings) });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to update device config";
+      res.status(toConfigStatus(message)).json({ ok: false, error: message });
+    }
+  });
+
   router.post("/devices/:deviceId/actions/refresh", async (req, res) => {
     try {
       res.json({ ok: true, detail: await service.refreshDevice(req.params.deviceId) });
@@ -100,13 +213,17 @@ export const createMmwaveRouter = (service: MmwaveService): Router => {
 
   router.post("/devices/:deviceId/actions/initialize", async (req, res) => {
     try {
+      const detectionMode = parseDetectionMode(req.body?.detectionMode);
+      if (!detectionMode) {
+        throw new Error("Invalid detection mode");
+      }
       res.json({
         ok: true,
         device: await service.initializeDevice(req.params.deviceId, {
           deviceNoMode: req.body?.deviceNoMode === "custom" ? "custom" : "auto",
           customDeviceNo: typeof req.body?.customDeviceNo === "string" ? req.body.customDeviceNo : undefined,
           installHeightM: toInstallHeightM(req.body?.installHeightM),
-          detectionMode: isDetectionMode(req.body?.detectionMode) ? req.body.detectionMode : "high_sensitivity",
+          detectionMode,
         }),
       });
     } catch (error) {

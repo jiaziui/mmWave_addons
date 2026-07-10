@@ -6,10 +6,10 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.DeviceStorage = void 0;
 const node_fs_1 = __importDefault(require("node:fs"));
 const node_path_1 = __importDefault(require("node:path"));
-const SNAPSHOT_WRITE_INTERVAL_MS = 5 * 60 * 1000;
+const profiles_1 = require("../types/profiles");
 const BINDING_REGISTRY_FILE = "devices.json";
-const DEVICE_META_FILE = "device.json";
-const DEVICE_DATA_FILE = "data.json";
+const DEVICE_META_FILE = "config.json";
+const LEGACY_DEVICE_DATA_FILE = "data.json";
 const BINDING_REGISTRY_VERSION = 1;
 const DEFAULT_COORDINATE = { xMin: -5, xMax: 5, yMin: 0, yMax: 9 };
 const DEFAULT_REGION_POSITIONS = [
@@ -25,19 +25,27 @@ const sanitizeIdPart = (value) => value
     .toLowerCase()
     .replace(/[^a-z0-9_-]+/g, "-")
     .replace(/^-+|-+$/g, "");
+const defaultModelForProfileId = (profileId) => {
+    if (profileId === "unknown") {
+        return "DFRobot mmWave";
+    }
+    return `DFRobot ${profileId.toUpperCase()}`;
+};
 const toStableDeviceId = (device) => {
+    const profilePrefix = device.profileId === "unknown" ? "mmwave" : device.profileId;
+    const prefixPart = sanitizeIdPart(device.prefix) || "device";
     if (device.haDeviceId) {
-        return `c4004-${sanitizeIdPart(device.haDeviceId)}`;
+        return `${profilePrefix}-${sanitizeIdPart(device.haDeviceId)}-${prefixPart}`;
     }
     if (device.macAddress) {
-        return `c4004-${sanitizeIdPart(device.macAddress)}`;
+        return `${profilePrefix}-${sanitizeIdPart(device.macAddress)}-${prefixPart}`;
     }
-    return `c4004-${sanitizeIdPart(device.prefix) || "device"}`;
+    return `${profilePrefix}-${prefixPart}`;
 };
 const formatDeviceNo = (sequence) => String(sequence);
 const normalizeDeviceNo = (value) => {
     const trimmed = value.trim();
-    const legacyMatch = /^C4004-(\d+)$/i.exec(trimmed);
+    const legacyMatch = /^C400\d-(\d+)$/i.exec(trimmed);
     const digits = legacyMatch?.[1] ?? trimmed.replace(/\D+/g, "");
     const parsed = Number(digits);
     return Number.isSafeInteger(parsed) && parsed > 0 ? String(parsed) : "";
@@ -51,7 +59,34 @@ const toFiniteNumber = (value, fallback) => {
     const parsed = typeof value === "number" ? value : Number(value);
     return Number.isFinite(parsed) ? parsed : fallback;
 };
-const normalizeDetectionMode = (value) => value === "static_stable" ? "static_stable" : "high_sensitivity";
+const toOptionalFiniteNumber = (value) => {
+    const parsed = typeof value === "number" ? value : Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+};
+const toOptionalBoolean = (value) => {
+    if (typeof value === "boolean") {
+        return value;
+    }
+    if (typeof value !== "string") {
+        return undefined;
+    }
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "on" || normalized === "true" || normalized === "1") {
+        return true;
+    }
+    if (normalized === "off" || normalized === "false" || normalized === "0") {
+        return false;
+    }
+    return undefined;
+};
+const normalizeDetectionMode = (value) => {
+    if (value === 2 || value === "2" || value === "static_stable") {
+        return 2;
+    }
+    return 1;
+};
+const normalizeStoredProfileId = (value, fallback = "c4004") => (0, profiles_1.isStoredMmwaveProfileId)(value) ? value : fallback;
+const normalizeProfileOverride = (value) => (0, profiles_1.isMmwaveProfileId)(value) ? value : undefined;
 const normalizeInstallInfo = (value) => {
     const record = isRecord(value) ? value : {};
     return {
@@ -59,6 +94,40 @@ const normalizeInstallInfo = (value) => {
         installAngleDeg: 0,
         installHeightM: normalizeInstallHeightM(record.installHeightM),
     };
+};
+const normalizeDeviceSettings = (value) => {
+    if (!isRecord(value)) {
+        return undefined;
+    }
+    const settings = {};
+    const booleanKeys = ["presenceEnable", "trajectoryTrackEnable", "trajectoryLed", "motionLed"];
+    const numberKeys = [
+        "installZAngle",
+        "realTimePeopleTime",
+        "trackMeters",
+        "trackExistsTime",
+        "checkToActiveFrames",
+        "unmannedTime",
+        "zone1McuIo",
+        "zone2McuIo",
+        "zone3McuIo",
+        "zone4McuIo",
+        "zone5McuIo",
+        "zone6McuIo",
+    ];
+    for (const key of booleanKeys) {
+        const parsed = toOptionalBoolean(value[key]);
+        if (parsed !== undefined) {
+            settings[key] = parsed;
+        }
+    }
+    for (const key of numberKeys) {
+        const parsed = toOptionalFiniteNumber(value[key]);
+        if (parsed !== undefined) {
+            settings[key] = parsed;
+        }
+    }
+    return Object.keys(settings).length ? settings : undefined;
 };
 const cloneRangeBox = (box) => ({
     xMin: box.xMin,
@@ -102,6 +171,13 @@ const createEmptyZoneSnapshot = (updatedAt) => ({
         staticCount: 0,
     },
 });
+const createDefaultDiscovery = (timestamp) => ({
+    status: "offline",
+    signal: 0,
+    lastSeen: timestamp,
+    discoveredAt: timestamp,
+    lastUpdated: timestamp,
+});
 const normalizeRegionConfig = (value) => {
     const fallback = createDefaultRegionConfig();
     if (!isRecord(value)) {
@@ -133,45 +209,13 @@ const normalizeRegionConfig = (value) => {
         }),
     };
 };
-const normalizeZoneSnapshot = (value, fallbackTimestamp) => {
-    const fallback = createEmptyZoneSnapshot(fallbackTimestamp);
-    if (!isRecord(value)) {
-        return fallback;
-    }
-    const rawPresenceStates = Array.isArray(value.presenceStates) ? value.presenceStates : [];
-    const presenceById = new Map();
-    for (const entry of rawPresenceStates) {
-        if (!isRecord(entry) || typeof entry.id !== "string") {
-            continue;
-        }
-        presenceById.set(entry.id, entry);
-    }
-    const counts = isRecord(value.counts) ? value.counts : {};
-    return {
-        updatedAt: typeof value.updatedAt === "string" && value.updatedAt.trim() ? value.updatedAt : fallbackTimestamp,
-        presenceStates: fallback.presenceStates.map((entry) => {
-            const current = presenceById.get(entry.id);
-            return {
-                id: entry.id,
-                active: typeof current?.active === "boolean" ? current.active : entry.active,
-            };
-        }),
-        counts: {
-            peopleCount: toFiniteNumber(counts.peopleCount, 0),
-            targetCount: toFiniteNumber(counts.targetCount, 0),
-            movingCount: toFiniteNumber(counts.movingCount, 0),
-            staticCount: toFiniteNumber(counts.staticCount, 0),
-        },
-    };
-};
 const normalizeBinding = (value) => {
     if (!isRecord(value)) {
         return null;
     }
     const deviceNo = typeof value.deviceNo === "string" ? normalizeDeviceNo(value.deviceNo) : "";
     const id = typeof value.id === "string" && value.id.trim() ? value.id.trim() : "";
-    const prefix = typeof value.prefix === "string" && value.prefix.trim() ? value.prefix.trim() : "";
-    if (!deviceNo || !id || !prefix) {
+    if (!deviceNo || !id) {
         return null;
     }
     const now = new Date().toISOString();
@@ -179,23 +223,14 @@ const normalizeBinding = (value) => {
         deviceNo,
         id,
         haDeviceId: typeof value.haDeviceId === "string" && value.haDeviceId.trim() ? value.haDeviceId.trim() : undefined,
-        macAddress: typeof value.macAddress === "string" && value.macAddress.trim() ? value.macAddress.trim() : "Unknown",
-        prefix,
+        macAddress: typeof value.macAddress === "string" && value.macAddress.trim() ? value.macAddress.trim() : undefined,
+        prefix: typeof value.prefix === "string" && value.prefix.trim() ? value.prefix.trim() : undefined,
         mqttTopicPrefix: typeof value.mqttTopicPrefix === "string" && value.mqttTopicPrefix.trim()
             ? value.mqttTopicPrefix.trim()
-            : prefix,
-        mqttKey: typeof value.mqttKey === "string" && value.mqttKey.trim() ? value.mqttKey.trim() : "main",
-        name: typeof value.name === "string" && value.name.trim() ? value.name.trim() : prefix,
+            : undefined,
         deploymentName: typeof value.deploymentName === "string" && value.deploymentName.trim()
             ? value.deploymentName.trim()
             : undefined,
-        model: typeof value.model === "string" && value.model.trim() ? value.model.trim() : "DFRobot C4004",
-        manufacturer: typeof value.manufacturer === "string" && value.manufacturer.trim() ? value.manufacturer.trim() : undefined,
-        firmwareVersion: typeof value.firmwareVersion === "string" && value.firmwareVersion.trim()
-            ? value.firmwareVersion.trim()
-            : undefined,
-        installInfo: normalizeInstallInfo(value.installInfo),
-        detectionMode: normalizeDetectionMode(value.detectionMode),
         boundAt: typeof value.boundAt === "string" && value.boundAt.trim() ? value.boundAt.trim() : now,
         updatedAt: typeof value.updatedAt === "string" && value.updatedAt.trim() ? value.updatedAt.trim() : now,
     };
@@ -218,57 +253,34 @@ const normalizeBindingRegistry = (raw) => {
         devices,
     };
 };
-const isOnlineStatus = (value) => value === "online" || value === "offline";
 const normalizeMetaFile = (raw, fallbackId) => {
     if (!isRecord(raw)) {
         return null;
     }
+    const prefix = typeof raw.prefix === "string" && raw.prefix.trim() ? raw.prefix : fallbackId;
     return {
         id: typeof raw.id === "string" && raw.id.trim() ? raw.id : fallbackId,
-        deviceNo: typeof raw.deviceNo === "string" && raw.deviceNo.trim() ? normalizeDeviceNo(raw.deviceNo) : undefined,
-        initialized: typeof raw.initialized === "boolean" ? raw.initialized : undefined,
-        profileId: raw.profileId === "c4004" ? "c4004" : "c4004",
+        profileId: normalizeStoredProfileId(raw.profileId, "c4004"),
+        profileOverride: normalizeProfileOverride(raw.profileOverride),
         haDeviceId: typeof raw.haDeviceId === "string" && raw.haDeviceId.trim() ? raw.haDeviceId : undefined,
-        name: typeof raw.name === "string" && raw.name.trim() ? raw.name : fallbackId,
+        macAddress: typeof raw.macAddress === "string" && raw.macAddress.trim() ? raw.macAddress : undefined,
         deploymentName: typeof raw.deploymentName === "string" && raw.deploymentName.trim() ? raw.deploymentName : undefined,
-        model: typeof raw.model === "string" && raw.model.trim() ? raw.model : "DFRobot C4004",
-        manufacturer: typeof raw.manufacturer === "string" && raw.manufacturer.trim() ? raw.manufacturer : undefined,
-        firmwareVersion: typeof raw.firmwareVersion === "string" && raw.firmwareVersion.trim() ? raw.firmwareVersion : undefined,
-        prefix: typeof raw.prefix === "string" && raw.prefix.trim() ? raw.prefix : fallbackId,
+        prefix,
         mqttTopicPrefix: typeof raw.mqttTopicPrefix === "string" && raw.mqttTopicPrefix.trim()
             ? raw.mqttTopicPrefix
-            : typeof raw.prefix === "string" && raw.prefix.trim()
-                ? raw.prefix
-                : fallbackId,
+            : prefix,
         mqttKey: typeof raw.mqttKey === "string" && raw.mqttKey.trim() ? raw.mqttKey : "main",
-        macAddress: typeof raw.macAddress === "string" && raw.macAddress.trim() ? raw.macAddress : "Unknown",
-        binding: {
-            entityCount: toFiniteNumber(isRecord(raw.binding) ? raw.binding.entityCount : undefined, 0),
-        },
         installInfo: isRecord(raw.installInfo) ? normalizeInstallInfo(raw.installInfo) : undefined,
-        detectionMode: raw.detectionMode === "high_sensitivity" || raw.detectionMode === "static_stable"
-            ? raw.detectionMode
+        detectionMode: raw.detectionMode === 1 ||
+            raw.detectionMode === 2 ||
+            raw.detectionMode === "1" ||
+            raw.detectionMode === "2" ||
+            raw.detectionMode === "high_sensitivity" ||
+            raw.detectionMode === "static_stable"
+            ? normalizeDetectionMode(raw.detectionMode)
             : undefined,
+        deviceSettings: normalizeDeviceSettings(raw.deviceSettings),
         regionConfig: normalizeRegionConfig(raw.regionConfig),
-    };
-};
-const normalizeDataFile = (raw, fallbackTimestamp, fallbackStatus = "offline") => {
-    const parsed = isRecord(raw) ? raw : {};
-    const discovery = isRecord(parsed.discovery) ? parsed.discovery : {};
-    const lastUpdated = typeof discovery.lastUpdated === "string" && discovery.lastUpdated.trim()
-        ? discovery.lastUpdated
-        : fallbackTimestamp;
-    return {
-        discovery: {
-            status: isOnlineStatus(discovery.status) ? discovery.status : fallbackStatus,
-            signal: toFiniteNumber(discovery.signal, 0),
-            lastSeen: typeof discovery.lastSeen === "string" && discovery.lastSeen.trim() ? discovery.lastSeen : lastUpdated,
-            discoveredAt: typeof discovery.discoveredAt === "string" && discovery.discoveredAt.trim()
-                ? discovery.discoveredAt
-                : lastUpdated,
-            lastUpdated,
-        },
-        lastZoneSnapshot: normalizeZoneSnapshot(parsed.lastZoneSnapshot, lastUpdated),
     };
 };
 const applyBindingToDevice = (device, binding) => {
@@ -281,31 +293,41 @@ const applyBindingToDevice = (device, binding) => {
     }
     return {
         ...device,
-        id: binding.id,
         deviceNo: binding.deviceNo,
         initialized: true,
-        haDeviceId: binding.haDeviceId ?? device.haDeviceId,
-        name: binding.name,
-        deploymentName: binding.deploymentName,
-        model: binding.model,
-        manufacturer: binding.manufacturer,
-        firmwareVersion: binding.firmwareVersion,
-        prefix: binding.prefix,
-        mqttTopicPrefix: binding.mqttTopicPrefix,
-        mqttKey: binding.mqttKey,
-        macAddress: binding.macAddress,
+        haDeviceId: device.haDeviceId ?? binding.haDeviceId,
+        macAddress: device.macAddress !== "Unknown" ? device.macAddress : binding.macAddress ?? "Unknown",
+        deploymentName: device.deploymentName ?? binding.deploymentName,
+        prefix: device.prefix || binding.prefix || device.id,
+        mqttTopicPrefix: device.mqttTopicPrefix || binding.mqttTopicPrefix || device.prefix,
         binding: {
             entityCount: Math.max(device.binding.entityCount, 1),
         },
-        installInfo: binding.installInfo,
-        detectionMode: binding.detectionMode,
     };
 };
-const combineStoredDevice = (meta, data, binding) => applyBindingToDevice({
-    ...meta,
-    initialized: Boolean(meta.initialized),
-    discovery: data.discovery,
-    lastZoneSnapshot: data.lastZoneSnapshot,
+const combineStoredDevice = (meta, binding) => applyBindingToDevice({
+    id: meta.id,
+    initialized: false,
+    profileId: meta.profileId,
+    profileStatus: "resolved",
+    profileOverride: meta.profileOverride,
+    haDeviceId: meta.haDeviceId,
+    deploymentName: meta.deploymentName,
+    name: meta.prefix,
+    model: defaultModelForProfileId(meta.profileId),
+    prefix: meta.prefix,
+    mqttTopicPrefix: meta.mqttTopicPrefix,
+    mqttKey: meta.mqttKey,
+    macAddress: meta.macAddress ?? "Unknown",
+    binding: {
+        entityCount: 0,
+    },
+    installInfo: meta.installInfo,
+    detectionMode: meta.detectionMode,
+    deviceSettings: meta.deviceSettings,
+    discovery: createDefaultDiscovery(new Date().toISOString()),
+    regionConfig: meta.regionConfig,
+    lastZoneSnapshot: createEmptyZoneSnapshot(new Date().toISOString()),
 }, binding);
 const createDeviceFromBinding = (binding) => {
     const now = new Date().toISOString();
@@ -314,28 +336,19 @@ const createDeviceFromBinding = (binding) => {
         deviceNo: binding.deviceNo,
         initialized: true,
         profileId: "c4004",
+        profileStatus: "resolved",
         haDeviceId: binding.haDeviceId,
-        name: binding.name,
+        name: binding.id,
+        model: defaultModelForProfileId("c4004"),
         deploymentName: binding.deploymentName,
-        model: binding.model,
-        manufacturer: binding.manufacturer,
-        firmwareVersion: binding.firmwareVersion,
-        prefix: binding.prefix,
-        mqttTopicPrefix: binding.mqttTopicPrefix,
-        mqttKey: binding.mqttKey,
-        macAddress: binding.macAddress,
+        prefix: binding.prefix ?? binding.id,
+        mqttTopicPrefix: binding.mqttTopicPrefix ?? binding.prefix ?? binding.id,
+        mqttKey: "main",
+        macAddress: binding.macAddress ?? "Unknown",
         binding: {
             entityCount: 1,
         },
-        installInfo: binding.installInfo,
-        detectionMode: binding.detectionMode,
-        discovery: {
-            status: "offline",
-            signal: 0,
-            lastSeen: binding.updatedAt,
-            discoveredAt: binding.boundAt,
-            lastUpdated: now,
-        },
+        discovery: createDefaultDiscovery(now),
         regionConfig: createDefaultRegionConfig(),
         lastZoneSnapshot: createEmptyZoneSnapshot(now),
     };
@@ -343,30 +356,20 @@ const createDeviceFromBinding = (binding) => {
 const splitStoredDevice = (device) => ({
     meta: {
         id: device.id,
-        deviceNo: device.deviceNo,
-        initialized: device.initialized,
         profileId: device.profileId,
+        profileOverride: device.profileOverride,
         haDeviceId: device.haDeviceId,
-        name: device.name,
+        macAddress: device.macAddress !== "Unknown" ? device.macAddress : undefined,
         deploymentName: device.deploymentName,
-        model: device.model,
-        manufacturer: device.manufacturer,
-        firmwareVersion: device.firmwareVersion,
         prefix: device.prefix,
         mqttTopicPrefix: device.mqttTopicPrefix,
         mqttKey: device.mqttKey,
-        macAddress: device.macAddress,
-        binding: device.binding,
         installInfo: device.installInfo,
         detectionMode: device.detectionMode,
+        deviceSettings: device.deviceSettings,
         regionConfig: device.regionConfig,
     },
-    data: {
-        discovery: device.discovery,
-        lastZoneSnapshot: device.lastZoneSnapshot,
-    },
 });
-const sameJson = (left, right) => JSON.stringify(left) === JSON.stringify(right);
 class DeviceStorage {
     constructor(dataDir) {
         this.dataDir = dataDir;
@@ -415,8 +418,7 @@ class DeviceStorage {
         const nextDevices = [];
         for (const [index, device] of devices.entries()) {
             const id = toStableDeviceId(device);
-            const matchingBinding = this.findBindingForDiscoveredDevice(registry, id, device);
-            const binding = matchingBinding ? { ...matchingBinding, id } : undefined;
+            const binding = this.findBindingForDiscoveredDevice(registry, id);
             if (!binding && device.status !== "online") {
                 continue;
             }
@@ -424,11 +426,14 @@ class DeviceStorage {
             const nextDevice = {
                 id,
                 initialized: false,
-                profileId: "c4004",
+                profileId: device.profileId,
+                profileSource: device.profileSource,
+                profileStatus: device.profileStatus,
+                profileOverride: existing?.profileOverride,
                 haDeviceId: device.haDeviceId ?? existing?.haDeviceId,
-                name: device.name || `C4004 Device ${index + 1}`,
+                name: device.name || `${(device.profileId === "unknown" ? "mmwave" : device.profileId).toUpperCase()} Device ${index + 1}`,
                 deploymentName: device.deploymentName ?? existing?.deploymentName,
-                model: device.model || "DFRobot C4004",
+                model: device.model || existing?.model || defaultModelForProfileId(device.profileId),
                 manufacturer: device.manufacturer ?? existing?.manufacturer,
                 firmwareVersion: device.firmwareVersion ?? existing?.firmwareVersion,
                 prefix: device.prefix,
@@ -438,6 +443,7 @@ class DeviceStorage {
                 binding: {
                     entityCount: device.entityCount,
                 },
+                deviceSettings: existing?.deviceSettings,
                 discovery: {
                     status: device.status,
                     signal: device.signal,
@@ -458,14 +464,11 @@ class DeviceStorage {
         const normalizedRegistry = {
             ...registry,
             devices: registry.devices.map((binding) => {
-                const discovered = nextDevices.find((device) => binding.id === device.id ||
-                    (binding.haDeviceId && binding.haDeviceId === device.haDeviceId) ||
-                    (binding.macAddress !== "Unknown" && binding.macAddress === device.macAddress) ||
-                    binding.prefix === device.prefix);
+                const discovered = nextDevices.find((device) => binding.id === device.id);
                 if (!discovered) {
                     return binding;
                 }
-                return this.createBindingFromDevice(discovered, binding.deviceNo, binding.installInfo, binding.detectionMode, binding.boundAt, now);
+                return this.createBindingFromDevice(discovered, binding.deviceNo, binding.boundAt, now);
             }),
         };
         this.writeBindingRegistry(normalizedRegistry);
@@ -488,68 +491,16 @@ class DeviceStorage {
             }
             node_fs_1.default.rmSync(this.getDeviceDir(entry.name), { recursive: true, force: true });
         }
-        return this.listDevices();
-    }
-    updateRuntimeState(current, updates, options) {
-        let nextRegionConfig = current.regionConfig;
-        let nextZoneSnapshot = current.lastZoneSnapshot;
-        if (updates.regionConfig) {
-            nextRegionConfig = normalizeRegionConfig(updates.regionConfig);
+        const devicesById = new Map(this.listDevices().map((device) => [device.id, device]));
+        for (const device of nextDevices) {
+            devicesById.set(device.id, device);
         }
-        if (updates.lastZoneSnapshot) {
-            const normalizedSnapshot = normalizeZoneSnapshot(updates.lastZoneSnapshot, updates.lastZoneSnapshot.updatedAt || new Date().toISOString());
-            const snapshotChanged = !sameJson(normalizedSnapshot, current.lastZoneSnapshot);
-            if (snapshotChanged) {
-                const previousUpdatedAt = Date.parse(current.lastZoneSnapshot.updatedAt);
-                const canWriteSnapshot = options?.forceSnapshot ||
-                    !Number.isFinite(previousUpdatedAt) ||
-                    Date.now() - previousUpdatedAt >= SNAPSHOT_WRITE_INTERVAL_MS;
-                if (canWriteSnapshot) {
-                    nextZoneSnapshot = normalizedSnapshot;
-                }
+        return [...devicesById.values()].sort((left, right) => {
+            if (left.initialized !== right.initialized) {
+                return left.initialized ? -1 : 1;
             }
-        }
-        const regionChanged = !sameJson(nextRegionConfig, current.regionConfig);
-        const zoneSnapshotChanged = !sameJson(nextZoneSnapshot, current.lastZoneSnapshot);
-        if (!regionChanged && !zoneSnapshotChanged) {
-            return current;
-        }
-        const nextDevice = {
-            ...current,
-            discovery: {
-                ...current.discovery,
-                lastUpdated: new Date().toISOString(),
-            },
-            regionConfig: nextRegionConfig,
-            lastZoneSnapshot: nextZoneSnapshot,
-        };
-        this.saveDevice(nextDevice);
-        return nextDevice;
-    }
-    updateDiscoveryStatuses(statusesByPrefix, timestamp = new Date().toISOString()) {
-        const devices = this.listDevices();
-        for (const device of devices) {
-            const status = statusesByPrefix.get(device.prefix);
-            if (!status) {
-                continue;
-            }
-            const statusChanged = device.discovery.status !== status;
-            const nextLastSeen = status === "online" ? timestamp : device.discovery.lastSeen;
-            const lastSeenChanged = device.discovery.lastSeen !== nextLastSeen;
-            if (!statusChanged && !lastSeenChanged) {
-                continue;
-            }
-            this.saveDevice({
-                ...device,
-                discovery: {
-                    ...device.discovery,
-                    status,
-                    lastSeen: nextLastSeen,
-                    lastUpdated: timestamp,
-                },
-            });
-        }
-        return this.listDevices();
+            return (left.deviceNo ?? left.name).localeCompare(right.deviceNo ?? right.name);
+        });
     }
     validateInitializeDevice(id, updates) {
         const current = this.getDevice(id);
@@ -581,13 +532,18 @@ class DeviceStorage {
             },
             installInfo,
             detectionMode: updates.detectionMode,
+            deviceSettings: {
+                ...current.deviceSettings,
+                checkToActiveFrames: updates.detectionMode === 1 ? 2 : 7,
+                unmannedTime: updates.detectionMode === 1 ? 5 : 30,
+            },
             discovery: {
                 ...current.discovery,
                 lastUpdated: now,
             },
         };
         const existingBinding = registry.devices.find((device) => device.id === id);
-        const nextBinding = this.createBindingFromDevice(nextDevice, deviceNo, installInfo, updates.detectionMode, existingBinding?.boundAt ?? now, now);
+        const nextBinding = this.createBindingFromDevice(nextDevice, deviceNo, existingBinding?.boundAt ?? now, now);
         const nextRegistry = {
             ...registry,
             nextSequence,
@@ -597,6 +553,26 @@ class DeviceStorage {
             ].sort((left, right) => left.deviceNo.localeCompare(right.deviceNo)),
         };
         this.writeBindingRegistry(nextRegistry);
+        this.saveDevice(nextDevice);
+        return nextDevice;
+    }
+    updateDeviceSettings(id, settings) {
+        const current = this.getDevice(id);
+        if (!current) {
+            throw new Error("Device not found");
+        }
+        const normalizedSettings = normalizeDeviceSettings(settings) ?? {};
+        const nextDevice = {
+            ...current,
+            deviceSettings: {
+                ...current.deviceSettings,
+                ...normalizedSettings,
+            },
+            discovery: {
+                ...current.discovery,
+                lastUpdated: new Date().toISOString(),
+            },
+        };
         this.saveDevice(nextDevice);
         return nextDevice;
     }
@@ -612,28 +588,18 @@ class DeviceStorage {
         });
         node_fs_1.default.rmSync(this.getDeviceDir(id), { recursive: true, force: true });
     }
-    findBindingForDiscoveredDevice(registry, id, device) {
-        return registry.devices.find((binding) => binding.id === id ||
-            (device.haDeviceId && binding.haDeviceId === device.haDeviceId) ||
-            (device.macAddress && binding.macAddress !== "Unknown" && binding.macAddress === device.macAddress) ||
-            binding.prefix === device.prefix);
+    findBindingForDiscoveredDevice(registry, id) {
+        return registry.devices.find((binding) => binding.id === id);
     }
-    createBindingFromDevice(device, deviceNo, installInfo, detectionMode, boundAt, updatedAt) {
+    createBindingFromDevice(device, deviceNo, boundAt, updatedAt) {
         return {
             deviceNo,
             id: device.id,
             haDeviceId: device.haDeviceId,
-            macAddress: device.macAddress,
+            macAddress: device.macAddress !== "Unknown" ? device.macAddress : undefined,
             prefix: device.prefix,
             mqttTopicPrefix: device.mqttTopicPrefix,
-            mqttKey: device.mqttKey,
-            name: device.name,
             deploymentName: device.deploymentName,
-            model: device.model,
-            manufacturer: device.manufacturer,
-            firmwareVersion: device.firmwareVersion,
-            installInfo,
-            detectionMode,
             boundAt,
             updatedAt,
         };
@@ -713,8 +679,8 @@ class DeviceStorage {
     getDeviceMetaPath(id) {
         return node_path_1.default.join(this.getDeviceDir(id), DEVICE_META_FILE);
     }
-    getDeviceDataPath(id) {
-        return node_path_1.default.join(this.getDeviceDir(id), DEVICE_DATA_FILE);
+    getLegacyDeviceDataPath(id) {
+        return node_path_1.default.join(this.getDeviceDir(id), LEGACY_DEVICE_DATA_FILE);
     }
     readDevice(id, bindingsById = new Map()) {
         try {
@@ -723,16 +689,7 @@ class DeviceStorage {
             if (!meta) {
                 return null;
             }
-            const fallbackTimestamp = new Date().toISOString();
-            let data = normalizeDataFile(null, fallbackTimestamp);
-            try {
-                const rawData = node_fs_1.default.readFileSync(this.getDeviceDataPath(id), "utf8");
-                data = normalizeDataFile(JSON.parse(rawData), fallbackTimestamp, data.discovery.status);
-            }
-            catch {
-                data = normalizeDataFile(null, fallbackTimestamp);
-            }
-            return combineStoredDevice(meta, data, bindingsById.get(meta.id));
+            return combineStoredDevice(meta, bindingsById.get(meta.id));
         }
         catch {
             return null;
@@ -742,9 +699,9 @@ class DeviceStorage {
         this.ensureDataDir();
         const deviceDir = this.getDeviceDir(device.id);
         node_fs_1.default.mkdirSync(deviceDir, { recursive: true });
-        const { meta, data } = splitStoredDevice(device);
+        const { meta } = splitStoredDevice(device);
         node_fs_1.default.writeFileSync(this.getDeviceMetaPath(device.id), JSON.stringify(meta, null, 2), "utf8");
-        node_fs_1.default.writeFileSync(this.getDeviceDataPath(device.id), JSON.stringify(data, null, 2), "utf8");
+        node_fs_1.default.rmSync(this.getLegacyDeviceDataPath(device.id), { force: true });
     }
 }
 exports.DeviceStorage = DeviceStorage;

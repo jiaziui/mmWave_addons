@@ -1,230 +1,107 @@
 import type { Logger } from "pino";
-import { DeviceStorage, type DetectionMode, type InitializeDeviceInput, type StoredMmwaveDevice } from "../config/storage";
-import { discoverC4004Devices, findWritableEntityId, toEntityId, writeC4004Entity } from "./c4004Profile";
+import { DeviceStorage, type InitializeDeviceInput, type StoredMmwaveDevice } from "../config/storage";
 import type { HaClient } from "../ha/client";
-import type { HaEntityState } from "../ha/types";
 import type { MqttBridge } from "./mqttBridge";
+import { getMmwaveProfile, resolveDiscoveredProfiles } from "./profiles/registry";
+import { RuntimeCacheStore } from "./runtimeCache";
 import type {
+  C4004DeviceSettings,
   MmwaveDeviceDetail,
   MmwaveOverviewDeviceCard,
   MmwaveOverviewMetrics,
   MmwaveOverviewResponse,
   RangeBox,
   RegionOverlay,
-  StoredRegionConfig,
-  StoredZoneSnapshot,
   TrajectorySnapshot,
 } from "../types/mmwave";
 
-const DEFAULT_COORDINATE: RangeBox = { xMin: -5, xMax: 5, yMin: 0, yMax: 9 };
-
-const REGION_POSITIONS = [
-  { x: -3.6, y: 6.8 },
-  { x: -1.4, y: 6.2 },
-  { x: 1.1, y: 6.5 },
-  { x: -2.5, y: 3.4 },
-  { x: 2.6, y: 3.6 },
-  { x: 0, y: 1.8 },
-];
-
-const DETECTION_MODE_PARAMS: Record<DetectionMode, { checkToActiveFrames: number; unmannedTime: number }> = {
-  high_sensitivity: {
-    checkToActiveFrames: 2,
-    unmannedTime: 5,
-  },
-  static_stable: {
-    checkToActiveFrames: 7,
-    unmannedTime: 30,
-  },
-};
-
-const normalizeState = (value: string | null | undefined): string => (value ? value.toLowerCase() : "");
-
-const isTruthyState = (value: string | null | undefined): boolean => {
-  const normalized = normalizeState(value);
-  return normalized === "on" || normalized === "true" || normalized === "online";
-};
-
-const isUnavailable = (value: string | null | undefined): boolean => {
-  const normalized = normalizeState(value);
-  return normalized === "unknown" || normalized === "unavailable" || normalized === "";
-};
-
-const isAvailableState = (value: string | null | undefined): boolean => !isUnavailable(value);
-
-const toNumber = (value: string | null | undefined): number | null => {
-  if (!value || isUnavailable(value)) {
-    return null;
-  }
-
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
-};
-
-const numberLabel = (value: number | null, suffix = ""): string => {
-  if (value === null) {
-    return "-";
-  }
-  return `${value}${suffix}`;
-};
-
-const getEntityState = (statesById: Map<string, HaEntityState>, entityId: string): HaEntityState | undefined =>
-  statesById.get(entityId);
-
-const readString = (statesById: Map<string, HaEntityState>, entityId: string): string | null =>
-  getEntityState(statesById, entityId)?.state ?? null;
-
-const readNumber = (statesById: Map<string, HaEntityState>, entityId: string): number | null =>
-  toNumber(readString(statesById, entityId));
-
-const objectIdFromEntityId = (entityId: string): string => entityId.split(".", 2)[1] ?? "";
-
-const resolveDeviceOnline = (
-  device: StoredMmwaveDevice,
-  statesById: Map<string, HaEntityState>,
-  states: HaEntityState[],
-): boolean => {
-  const onlineState = readString(statesById, `binary_sensor.${device.prefix}_online`);
-  if (onlineState !== null) {
-    return isTruthyState(onlineState);
-  }
-  return states.some(
-    (state) => objectIdFromEntityId(state.entity_id).startsWith(`${device.prefix}_`) && isAvailableState(state.state),
-  );
-};
+interface MmwaveDeviceConfig {
+  id: string;
+  deviceNo?: string;
+  initialized: boolean;
+  profileId: StoredMmwaveDevice["profileId"];
+  prefix: string;
+  mqttTopicPrefix: string;
+  mqttKey: string;
+  installInfo: StoredMmwaveDevice["installInfo"];
+  detectionMode: StoredMmwaveDevice["detectionMode"];
+  regionConfig: StoredMmwaveDevice["regionConfig"];
+  deviceSettings: C4004DeviceSettings;
+}
 
 const cloneRangeBox = (rangeBox: RangeBox): RangeBox => ({ ...rangeBox });
 
-const buildRangeBox = (statesById: Map<string, HaEntityState>, prefix: string): RangeBox => {
-  const xMin = readNumber(statesById, toEntityId(prefix, { key: "rangeXMin", domain: "number", slug: "range_x_min", access: "readwrite" }));
-  const xMax = readNumber(statesById, toEntityId(prefix, { key: "rangeXMax", domain: "number", slug: "range_x_max", access: "readwrite" }));
-  const yMin = readNumber(statesById, toEntityId(prefix, { key: "rangeYMin", domain: "number", slug: "range_y_min", access: "readwrite" }));
-  const yMax = readNumber(statesById, toEntityId(prefix, { key: "rangeYMax", domain: "number", slug: "range_y_max", access: "readwrite" }));
-
-  return {
-    xMin: xMin !== null ? xMin / 100 : DEFAULT_COORDINATE.xMin,
-    xMax: xMax !== null ? xMax / 100 : DEFAULT_COORDINATE.xMax,
-    yMin: yMin !== null ? yMin / 100 : DEFAULT_COORDINATE.yMin,
-    yMax: yMax !== null ? yMax / 100 : DEFAULT_COORDINATE.yMax,
-  };
-};
-
-const sumZoneCounts = (
-  statesById: Map<string, HaEntityState>,
-  prefix: string,
-  kind: "moving" | "static",
-): number => {
-  let total = 0;
-  for (let index = 1; index <= 5; index += 1) {
-    const slug = `zone_${index}_${kind}_count`;
-    const value = readNumber(statesById, `sensor.${prefix}_${slug}`);
-    if (value !== null) {
-      total += value;
-    }
-  }
-  return total;
-};
-
-const resolveStoredRegions = (storedConfig?: StoredRegionConfig): StoredRegionConfig["regions"] =>
-  Array.from({ length: 6 }, (_, index) => {
-    const id = `zone-${index + 1}`;
-    const storedRegion = storedConfig?.regions.find((region) => region.id === id);
-
-    return {
-      id,
-      label: storedRegion?.label ?? `Zone ${index + 1}`,
-      x: storedRegion?.x ?? REGION_POSITIONS[index]?.x ?? 0,
-      y: storedRegion?.y ?? REGION_POSITIONS[index]?.y ?? 0,
-      enabled: storedRegion?.enabled ?? true,
-    };
-  });
-
-const buildRegionConfig = (
-  statesById: Map<string, HaEntityState>,
-  prefix: string,
-  storedConfig?: StoredRegionConfig,
-): StoredRegionConfig => ({
-  coordinate: cloneRangeBox(storedConfig?.coordinate ?? DEFAULT_COORDINATE),
-  rangeBox: buildRangeBox(statesById, prefix),
-  regions: resolveStoredRegions(storedConfig),
-});
-
-const buildRegions = (
-  statesById: Map<string, HaEntityState>,
-  prefix: string,
-  storedConfig?: StoredRegionConfig,
-): RegionOverlay[] =>
-  resolveStoredRegions(storedConfig).map((region, index) => {
-    const entityId = toEntityId(prefix, {
-      key: `zone${index + 1}Presence`,
-      domain: "binary_sensor",
-      slug: `zone_${index + 1}_presence`,
-      access: "read",
-    });
-
-    return {
+const buildGenericRegions = (device: StoredMmwaveDevice): RegionOverlay[] => {
+  const presenceById = new Map(device.lastZoneSnapshot.presenceStates.map((state) => [state.id, state.active]));
+  return device.regionConfig.regions
+    .filter((region) => region.enabled)
+    .map((region) => ({
       id: region.id,
       label: region.label,
-      active: isTruthyState(readString(statesById, entityId)),
+      active: presenceById.get(region.id) ?? false,
       x: region.x,
       y: region.y,
-    };
-  });
+    }));
+};
 
-const buildZoneSnapshot = (statesById: Map<string, HaEntityState>, prefix: string): StoredZoneSnapshot => ({
-  updatedAt: new Date().toISOString(),
-  presenceStates: Array.from({ length: 6 }, (_, index) => {
-    const entityId = toEntityId(prefix, {
-      key: `zone${index + 1}Presence`,
-      domain: "binary_sensor",
-      slug: `zone_${index + 1}_presence`,
-      access: "read",
-    });
-
-    return {
-      id: `zone-${index + 1}`,
-      active: isTruthyState(readString(statesById, entityId)),
-    };
-  }),
-  counts: {
-    peopleCount: readNumber(statesById, `sensor.${prefix}_people_count`) ?? 0,
-    targetCount: readNumber(statesById, `sensor.${prefix}_target_count`) ?? 0,
-    movingCount: sumZoneCounts(statesById, prefix, "moving"),
-    staticCount: sumZoneCounts(statesById, prefix, "static"),
-  },
+const buildGenericDeviceCard = (
+  device: StoredMmwaveDevice,
+  mqttBridge: MqttBridge,
+  trajectory: TrajectorySnapshot | null,
+): MmwaveOverviewDeviceCard => ({
+  id: device.id,
+  name: device.name,
+  model: device.model,
+  online: device.discovery.status === "online",
+  status: device.discovery.status === "online" ? "Online" : "Offline",
+  signal: device.discovery.signal,
+  peopleCount: device.lastZoneSnapshot.counts.peopleCount,
+  targetCount: device.lastZoneSnapshot.counts.targetCount,
+  staticCount: device.lastZoneSnapshot.counts.staticCount,
+  trajectoryAvailable: Boolean(trajectory),
+  mqttConnected: mqttBridge.isConnected(),
+  coordinate: cloneRangeBox(device.regionConfig.coordinate),
+  rangeBox: cloneRangeBox(device.regionConfig.rangeBox),
+  regions: buildGenericRegions(device),
+  targets: trajectory?.points ?? [],
 });
 
-const resolveTrajectory = (deviceId: string, mqttBridge: MqttBridge): TrajectorySnapshot | null =>
-  mqttBridge.getSnapshot(deviceId) ?? null;
-
-const buildDeviceCard = (
+const buildGenericDeviceDetail = (
   device: StoredMmwaveDevice,
-  statesById: Map<string, HaEntityState>,
   mqttBridge: MqttBridge,
-): MmwaveOverviewDeviceCard => {
-  const peopleCount = readNumber(statesById, `sensor.${device.prefix}_people_count`) ?? 0;
-  const targetCount = readNumber(statesById, `sensor.${device.prefix}_target_count`) ?? 0;
-  const staticCount = sumZoneCounts(statesById, device.prefix, "static");
-  const trajectory = resolveTrajectory(device.id, mqttBridge);
-  const online = isTruthyState(readString(statesById, `binary_sensor.${device.prefix}_online`));
-  const status = readString(statesById, `text_sensor.${device.prefix}_status`) ?? (online ? "Online" : "Offline");
-
+  trajectory: TrajectorySnapshot | null,
+): MmwaveDeviceDetail => {
+  const profile = getMmwaveProfile(device.profileId);
   return {
     id: device.id,
     name: device.name,
     model: device.model,
-    online,
-    status,
-    signal: device.discovery.signal,
-    peopleCount,
-    targetCount,
-    staticCount,
+    deviceId: device.haDeviceId ?? device.prefix,
+    online: device.discovery.status === "online",
+    firmwareVersion: device.firmwareVersion,
     trajectoryAvailable: Boolean(trajectory),
     mqttConnected: mqttBridge.isConnected(),
+    lastUpdated: device.discovery.lastUpdated,
     coordinate: cloneRangeBox(device.regionConfig.coordinate),
     rangeBox: cloneRangeBox(device.regionConfig.rangeBox),
-    regions: buildRegions(statesById, device.prefix, device.regionConfig),
+    regions: buildGenericRegions(device),
     targets: trajectory?.points ?? [],
+    movingCount: device.lastZoneSnapshot.counts.movingCount,
+    staticCount: device.lastZoneSnapshot.counts.staticCount,
+    ioStates: [],
+    basics: [
+      { key: "profileId", label: "设备类型", value: device.profileId },
+      { key: "profileStatus", label: "适配状态", value: device.profileStatus },
+      { key: "profileSource", label: "识别来源", value: device.profileSource ?? "-" },
+      { key: "manufacturer", label: "厂商", value: device.manufacturer ?? "-" },
+      { key: "firmwareVersion", label: "固件版本", value: device.firmwareVersion ?? "-" },
+      { key: "runtimeSupport", label: "运行时支持", value: profile?.runtimeSupported ? "supported" : "pending" },
+    ],
+    actions: {
+      canReset: Boolean(profile?.capabilities.supportsReset),
+      canRefresh: true,
+      canManageRegions: Boolean(profile?.capabilities.supportsRegions),
+    },
   };
 };
 
@@ -235,7 +112,23 @@ const buildMetrics = (devices: MmwaveOverviewDeviceCard[]): MmwaveOverviewMetric
   staticCount: devices.reduce((sum, device) => sum + device.staticCount, 0),
 });
 
+const buildDeviceConfig = (device: StoredMmwaveDevice): MmwaveDeviceConfig => ({
+  id: device.id,
+  deviceNo: device.deviceNo,
+  initialized: device.initialized,
+  profileId: device.profileId,
+  prefix: device.prefix,
+  mqttTopicPrefix: device.mqttTopicPrefix,
+  mqttKey: device.mqttKey,
+  installInfo: device.installInfo,
+  detectionMode: device.detectionMode,
+  regionConfig: device.regionConfig,
+  deviceSettings: device.deviceSettings ?? {},
+});
+
 export class MmwaveService {
+  private readonly runtimeCache = new RuntimeCacheStore();
+
   constructor(
     private readonly haClient: HaClient | null,
     private readonly storage: DeviceStorage,
@@ -243,18 +136,36 @@ export class MmwaveService {
     private readonly logger: Logger,
   ) {}
 
+  private getManagedMqttDevices(devices: StoredMmwaveDevice[]): StoredMmwaveDevice[] {
+    return devices.filter((device) => {
+      if (!device.initialized || device.profileStatus !== "resolved") {
+        return false;
+      }
+      const profile = getMmwaveProfile(device.profileId);
+      return Boolean(profile?.capabilities.supportsMqttBridge && profile.getTrajectoryTopic?.(device));
+    });
+  }
+
+  private hydrateDevices(devices: StoredMmwaveDevice[]): StoredMmwaveDevice[] {
+    return devices.map((device) => this.runtimeCache.hydrateDevice(device));
+  }
+
   async discoverDevices(): Promise<StoredMmwaveDevice[]> {
     if (!this.haClient) {
       return this.storage.listDevices();
     }
 
-    const candidates = await discoverC4004Devices(this.haClient);
+    const existingDevices = this.storage.listDevices();
+    const candidates = await resolveDiscoveredProfiles(this.haClient, existingDevices);
     const devices = await this.storage.replaceFromDiscovery(
       candidates.map((candidate) => ({
+        profileId: candidate.profileId,
+        profileSource: candidate.profileSource,
+        profileStatus: candidate.profileStatus,
         haDeviceId: candidate.deviceId,
         name: candidate.deviceName ?? candidate.prefix,
         deploymentName: candidate.deploymentName,
-        model: candidate.deviceModel ?? "DFRobot C4004",
+        model: candidate.deviceModel ?? `DFRobot ${candidate.profileId.toUpperCase()}`,
         manufacturer: candidate.manufacturer,
         firmwareVersion: candidate.firmwareVersion,
         prefix: candidate.prefix,
@@ -266,33 +177,66 @@ export class MmwaveService {
         macAddress: candidate.macAddress,
       })),
     );
-    this.mqttBridge.setDevices(devices.filter((device) => device.initialized));
-    return devices;
+    for (const device of devices) {
+      const candidate = candidates.find((entry) => entry.prefix === device.prefix);
+      this.runtimeCache.ensureDevice(device);
+      if (candidate) {
+        const now = new Date().toISOString();
+        this.runtimeCache.upsertIdentity(device, {
+          name: candidate.deviceName ?? candidate.prefix,
+          deploymentName: candidate.deploymentName,
+          model: candidate.deviceModel ?? `DFRobot ${candidate.profileId.toUpperCase()}`,
+          manufacturer: candidate.manufacturer,
+          firmwareVersion: candidate.firmwareVersion,
+          macAddress: candidate.macAddress,
+          profileSource: candidate.profileSource,
+          profileStatus: candidate.profileStatus,
+          entityCount: candidate.entityCount,
+        });
+        this.runtimeCache.updateDiscovery(device, {
+          status: candidate.status,
+          signal: Math.min(98, 64 + candidate.score * 4),
+          lastSeen: candidate.status === "online" ? now : device.discovery.lastSeen,
+          discoveredAt: device.discovery.discoveredAt,
+          lastUpdated: now,
+        });
+      }
+    }
+    const hydratedDevices = this.hydrateDevices(devices);
+    this.mqttBridge.setDevices(this.getManagedMqttDevices(hydratedDevices));
+    return hydratedDevices;
   }
 
   async listDevices(): Promise<StoredMmwaveDevice[]> {
     const devices = await this.refreshDeviceStatuses();
-    this.mqttBridge.setDevices(devices.filter((device) => device.initialized));
+    this.mqttBridge.setDevices(this.getManagedMqttDevices(devices));
     return devices;
   }
 
   private async refreshDeviceStatuses(): Promise<StoredMmwaveDevice[]> {
     const devices = this.storage.listDevices();
     if (!this.haClient || !devices.length) {
-      return devices;
+      return this.hydrateDevices(devices);
     }
 
     const states = await this.haClient.getAllStates();
     const statesById = new Map(states.map((state) => [state.entity_id, state]));
-    const statusesByPrefix = new Map<string, "online" | "offline">();
     for (const device of devices) {
-      statusesByPrefix.set(
-        device.prefix,
-        resolveDeviceOnline(device, statesById, states) ? "online" : "offline",
-      );
+      const profile = getMmwaveProfile(device.profileId);
+      if (!profile?.resolveDeviceOnline) {
+        continue;
+      }
+      const status = profile.resolveDeviceOnline(device, statesById, states) ? "online" : "offline";
+      const cachedDevice = this.runtimeCache.hydrateDevice(device);
+      const now = new Date().toISOString();
+      this.runtimeCache.updateDiscovery(device, {
+        status,
+        lastSeen: status === "online" ? now : cachedDevice.discovery.lastSeen,
+        lastUpdated: now,
+      });
     }
 
-    return this.storage.updateDiscoveryStatuses(statusesByPrefix);
+    return this.hydrateDevices(devices);
   }
 
   isMqttConnected(): boolean {
@@ -301,17 +245,15 @@ export class MmwaveService {
 
   private syncDeviceState(
     device: StoredMmwaveDevice,
-    statesById: Map<string, HaEntityState>,
+    statesById: Map<string, import("../ha/types").HaEntityState>,
     options?: { forceSnapshot?: boolean },
   ): StoredMmwaveDevice {
-    return this.storage.updateRuntimeState(
-      device,
-      {
-        regionConfig: buildRegionConfig(statesById, device.prefix, device.regionConfig),
-        lastZoneSnapshot: buildZoneSnapshot(statesById, device.prefix),
-      },
-      options,
-    );
+    const profile = getMmwaveProfile(device.profileId);
+    if (!profile?.buildRuntimeState) {
+      return this.runtimeCache.hydrateDevice(device);
+    }
+    this.runtimeCache.updateNative(device, profile.buildRuntimeState(device, statesById, options));
+    return this.runtimeCache.hydrateDevice(device);
   }
 
   async getOverview(): Promise<MmwaveOverviewResponse> {
@@ -324,7 +266,15 @@ export class MmwaveService {
     const statesById = new Map(states.map((state) => [state.entity_id, state]));
     const cards = devices.map((device) => {
       const syncedDevice = this.syncDeviceState(device, statesById);
-      return buildDeviceCard(syncedDevice, statesById, this.mqttBridge);
+      const trajectory = this.runtimeCache.getTrajectory(syncedDevice.id);
+      const profile = getMmwaveProfile(syncedDevice.profileId);
+      if (profile?.buildOverviewCard) {
+        return profile.buildOverviewCard(syncedDevice, statesById, {
+          trajectory,
+          mqttConnected: this.mqttBridge.isConnected(),
+        });
+      }
+      return buildGenericDeviceCard(syncedDevice, this.mqttBridge, trajectory);
     });
 
     return {
@@ -347,83 +297,16 @@ export class MmwaveService {
     const states = await this.haClient.getAllStates();
     const statesById = new Map(states.map((state) => [state.entity_id, state]));
     const syncedDevice = this.syncDeviceState(device, statesById, options);
-    const trajectory = resolveTrajectory(syncedDevice.id, this.mqttBridge);
-    const online = isTruthyState(readString(statesById, `binary_sensor.${syncedDevice.prefix}_online`));
-    const movingCount = sumZoneCounts(statesById, syncedDevice.prefix, "moving");
-    const staticCount = sumZoneCounts(statesById, syncedDevice.prefix, "static");
+    const trajectory = this.runtimeCache.getTrajectory(syncedDevice.id);
+    const profile = getMmwaveProfile(syncedDevice.profileId);
+    if (profile?.buildDeviceDetail) {
+      return profile.buildDeviceDetail(syncedDevice, statesById, {
+        trajectory,
+        mqttConnected: this.mqttBridge.isConnected(),
+      });
+    }
 
-    return {
-      id: syncedDevice.id,
-      name: syncedDevice.name,
-      model: syncedDevice.model,
-      deviceId: syncedDevice.haDeviceId ?? syncedDevice.prefix,
-      online,
-      firmwareVersion: syncedDevice.firmwareVersion,
-      trajectoryAvailable: Boolean(trajectory),
-      mqttConnected: this.mqttBridge.isConnected(),
-      lastUpdated: new Date().toISOString(),
-      coordinate: cloneRangeBox(syncedDevice.regionConfig.coordinate),
-      rangeBox: cloneRangeBox(syncedDevice.regionConfig.rangeBox),
-      regions: buildRegions(statesById, syncedDevice.prefix, syncedDevice.regionConfig),
-      targets: trajectory?.points ?? [],
-      movingCount,
-      staticCount,
-      ioStates: [
-        { id: "io1", label: "IO1", active: isTruthyState(readString(statesById, `binary_sensor.${syncedDevice.prefix}_presence`)) },
-        { id: "io2", label: "IO2", active: isTruthyState(readString(statesById, `binary_sensor.${syncedDevice.prefix}_zone_1_presence`)) },
-        { id: "io3", label: "IO3", active: isTruthyState(readString(statesById, `binary_sensor.${syncedDevice.prefix}_zone_2_presence`)) },
-        { id: "io4", label: "IO4", active: isTruthyState(readString(statesById, `binary_sensor.${syncedDevice.prefix}_zone_3_presence`)) },
-        { id: "io5", label: "IO5", active: isTruthyState(readString(statesById, `binary_sensor.${syncedDevice.prefix}_zone_4_presence`)) },
-        { id: "io6", label: "IO6", active: isTruthyState(readString(statesById, `binary_sensor.${syncedDevice.prefix}_zone_5_presence`)) },
-      ],
-      basics: [
-        {
-          key: "installMode",
-          label: "安装方式",
-          value: readString(statesById, `select.${syncedDevice.prefix}_install_mode`) ?? "-",
-        },
-        {
-          key: "realTimePeopleTime",
-          label: "实时人数上报时间",
-          value: numberLabel(readNumber(statesById, `number.${syncedDevice.prefix}_real_time_people_time`), " s"),
-        },
-        {
-          key: "installHeight",
-          label: "安装高度",
-          value: numberLabel(readNumber(statesById, `number.${syncedDevice.prefix}_install_height`), " cm"),
-        },
-        {
-          key: "trackMeters",
-          label: "轨迹产生米数",
-          value: numberLabel(readNumber(statesById, `number.${syncedDevice.prefix}_track_meters`), " m"),
-        },
-        {
-          key: "detectionRangeMode",
-          label: "探测模式",
-          value: readString(statesById, `text_sensor.${syncedDevice.prefix}_detection_range_mode`) ?? "-",
-        },
-        {
-          key: "trackExistsTime",
-          label: "轨迹存在时间",
-          value: numberLabel(readNumber(statesById, `number.${syncedDevice.prefix}_track_exists_time`), " s"),
-        },
-        {
-          key: "checkToActiveFrames",
-          label: "确认帧数",
-          value: numberLabel(readNumber(statesById, `number.${syncedDevice.prefix}_check_to_active_frames`)),
-        },
-        {
-          key: "unmannedTime",
-          label: "无人时间",
-          value: numberLabel(readNumber(statesById, `number.${syncedDevice.prefix}_unmanned_time`), " s"),
-        },
-      ],
-      actions: {
-        canReset: Boolean(findWritableEntityId(syncedDevice.prefix, "reset")),
-        canRefresh: true,
-        canManageRegions: true,
-      },
-    };
+    return buildGenericDeviceDetail(syncedDevice, this.mqttBridge, trajectory);
   }
 
   async refreshDevice(deviceId: string): Promise<MmwaveDeviceDetail> {
@@ -444,8 +327,50 @@ export class MmwaveService {
       throw new Error("Home Assistant is not linked");
     }
 
-    await writeC4004Entity(this.haClient, device.prefix, "reset");
+    const profile = getMmwaveProfile(device.profileId);
+    if (!profile?.capabilities.supportsReset || !profile.resetDevice) {
+      throw new Error("Device profile does not support reset yet");
+    }
+
+    await profile.resetDevice(this.haClient, device);
     return this.getDeviceDetail(deviceId);
+  }
+
+  async getDeviceConfig(deviceId: string): Promise<MmwaveDeviceConfig> {
+    const device = this.storage.getDevice(deviceId);
+    if (!device) {
+      throw new Error("Device not found");
+    }
+
+    const profile = getMmwaveProfile(device.profileId);
+    if (!this.haClient || !profile?.readDeviceSettings) {
+      return buildDeviceConfig(device);
+    }
+
+    const states = await this.haClient.getAllStates();
+    const statesById = new Map(states.map((state) => [state.entity_id, state]));
+    const syncedSettings = profile.readDeviceSettings(device, statesById);
+    const syncedDevice = this.storage.updateDeviceSettings(deviceId, syncedSettings);
+    return buildDeviceConfig(syncedDevice);
+  }
+
+  async updateDeviceConfig(deviceId: string, settings: C4004DeviceSettings): Promise<MmwaveDeviceConfig> {
+    const device = this.storage.getDevice(deviceId);
+    if (!device) {
+      throw new Error("Device not found");
+    }
+    if (!this.haClient) {
+      throw new Error("Home Assistant is not linked");
+    }
+
+    const profile = getMmwaveProfile(device.profileId);
+    if (!profile?.writeDeviceSettings) {
+      throw new Error("Device profile does not support config yet");
+    }
+
+    await profile.writeDeviceSettings(this.haClient, device, settings);
+    const updatedDevice = this.storage.updateDeviceSettings(deviceId, settings);
+    return buildDeviceConfig(updatedDevice);
   }
 
   async initializeDevice(
@@ -457,24 +382,30 @@ export class MmwaveService {
       throw new Error("Home Assistant is not linked");
     }
 
-    const modeParams = DETECTION_MODE_PARAMS[payload.detectionMode];
-    await writeC4004Entity(this.haClient, current.prefix, "installHeight", Math.round(payload.installHeightM * 100));
-    await writeC4004Entity(this.haClient, current.prefix, "checkToActiveFrames", modeParams.checkToActiveFrames);
-    await writeC4004Entity(this.haClient, current.prefix, "unmannedTime", modeParams.unmannedTime);
+    const profile = getMmwaveProfile(current.profileId);
+    if (!profile?.capabilities.supportsInitializeWorkflow || !profile.initializeDevice) {
+      throw new Error("Device profile does not support initialization yet");
+    }
 
+    await profile.initializeDevice(this.haClient, current, payload);
     const device = this.storage.initializeDevice(deviceId, payload);
-    this.mqttBridge.setDevices(this.storage.listDevices().filter((storedDevice) => storedDevice.initialized));
-    return device;
+    this.mqttBridge.setDevices(this.getManagedMqttDevices(this.storage.listDevices()));
+    return this.runtimeCache.hydrateDevice(device);
   }
 
   async unbindDevice(deviceId: string): Promise<StoredMmwaveDevice[]> {
     this.storage.unbindDevice(deviceId);
+    this.runtimeCache.deleteDevice(deviceId);
     const devices = this.haClient ? await this.discoverDevices() : this.storage.listDevices();
-    this.mqttBridge.setDevices(devices.filter((device) => device.initialized));
-    return devices;
+    this.mqttBridge.setDevices(this.getManagedMqttDevices(devices));
+    return this.hydrateDevices(devices);
   }
 
-  handleTrajectorySnapshot(_deviceId: string, _snapshot: TrajectorySnapshot): void {
-    // Trajectory snapshots stay in MqttBridge memory only.
+  handleTrajectorySnapshot(deviceId: string, snapshot: TrajectorySnapshot): void {
+    const device = this.storage.getDevice(deviceId);
+    if (device) {
+      this.runtimeCache.ensureDevice(device);
+    }
+    this.runtimeCache.updateTrajectory(deviceId, snapshot);
   }
 }

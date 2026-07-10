@@ -1,0 +1,12 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.isProfileStatus = exports.isProfileSource = exports.isStoredMmwaveProfileId = exports.isMmwaveProfileId = exports.MMWAVE_PROFILE_IDS = void 0;
+exports.MMWAVE_PROFILE_IDS = ["c4004"];
+const isMmwaveProfileId = (value) => typeof value === "string" && exports.MMWAVE_PROFILE_IDS.includes(value);
+exports.isMmwaveProfileId = isMmwaveProfileId;
+const isStoredMmwaveProfileId = (value) => value === "unknown" || (0, exports.isMmwaveProfileId)(value);
+exports.isStoredMmwaveProfileId = isStoredMmwaveProfileId;
+const isProfileSource = (value) => value === "metadata" || value === "marker" || value === "override" || value === "signature";
+exports.isProfileSource = isProfileSource;
+const isProfileStatus = (value) => value === "resolved" || value === "unresolved" || value === "unsupported";
+exports.isProfileStatus = isProfileStatus;

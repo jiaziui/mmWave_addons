@@ -1,0 +1,660 @@
+<!DOCTYPE html>
+
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>区域配置 - 雷达监测与管控平台</title>
+<!-- Tailwind CSS -->
+<script src="https://modao.cc/agent-py/static/source/js/tailwindcss.js"></script>
+<!-- Iconify 图标 -->
+<script src="https://modao.cc/agent-py/static/source/js/iconify-icon.min.js"></script>
+<style>
+        @font-face {
+            font-family: 'PingFang SC';
+            src: local('PingFang SC'), local('Microsoft YaHei');
+        }
+        body {
+            font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            background-color: #f0f2f5;
+            overflow: hidden;
+        }
+        .canvas-grid {
+            background-image: 
+                linear-gradient(to right, #e5e7eb 1px, transparent 1px),
+                linear-gradient(to bottom, #e5e7eb 1px, transparent 1px);
+            background-size: 20px 20px;
+        }
+        .sidebar-item-active {
+            background-color: #2D4B8C;
+            color: white;
+            border-right: 4px solid #4DABF7;
+        }
+        .panel-shadow {
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        }
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 6px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: #cbd5e1;
+            border-radius: 3px;
+        }
+        .shape-label {
+            pointer-events: none;
+            text-shadow: 0 1px 2px rgba(0,0,0,0.5);
+        }
+        /* 模拟选中动画 */
+        .shape-selected {
+            stroke-width: 3px;
+            stroke-dasharray: 5;
+            animation: dash 5s linear infinite;
+        }
+        @keyframes dash {
+            to { stroke-dashoffset: 50; }
+        }
+        .dropdown-menu {
+            display: none;
+            z-index: 100;
+        }
+        .dropdown-active .dropdown-menu {
+            display: block;
+        }
+    </style>
+</head>
+<body class="flex h-screen w-screen overflow-hidden">
+<!-- 左侧导航栏 -->
+<aside class="w-64 bg-[#1A2332] flex flex-col flex-none z-50">
+<div class="p-6 flex items-center gap-3">
+<div class="w-8 h-8 bg-[#2D4B8C] rounded flex items-center justify-center">
+<iconify-icon class="text-white text-xl" icon="mdi:radar"></iconify-icon>
+</div>
+<span class="text-white font-bold text-lg tracking-wider">雷达管控平台</span>
+</div>
+<nav class="flex-1 mt-4 overflow-y-auto custom-scrollbar">
+<a class="flex items-center px-6 py-4 text-gray-400 hover:text-white hover:bg-[#242f42] transition-colors gap-3" href="#">
+<iconify-icon class="text-xl" icon="mdi:view-dashboard"></iconify-icon>
+<span>数据总览</span>
+</a>
+<a class="flex items-center px-6 py-4 text-gray-400 hover:text-white hover:bg-[#242f42] transition-colors gap-3" href="#">
+<iconify-icon class="text-xl" icon="mdi:gauge"></iconify-icon>
+<span>仪表盘</span>
+</a>
+<a class="flex items-center px-6 py-4 text-gray-400 hover:text-white hover:bg-[#242f42] transition-colors gap-3" href="#">
+<iconify-icon class="text-xl" icon="mdi:information-outline"></iconify-icon>
+<span>详情</span>
+</a>
+<a class="flex items-center px-6 py-4 text-gray-400 hover:text-white hover:bg-[#242f42] transition-colors gap-3" href="#">
+<iconify-icon class="text-xl" icon="mdi:router-wireless"></iconify-icon>
+<span>设备管理</span>
+</a>
+<a class="flex items-center px-6 py-4 text-gray-400 hover:text-white hover:bg-[#242f42] transition-colors gap-3" href="#">
+<iconify-icon class="text-xl" icon="mdi:home"></iconify-icon>
+<span>首页</span>
+</a>
+<a class="flex items-center px-6 py-4 text-gray-400 hover:text-white hover:bg-[#242f42] transition-colors gap-3" href="#">
+<iconify-icon class="text-xl" icon="mdi:link-variant"></iconify-icon>
+<span>IO联动</span>
+</a>
+<a class="flex items-center px-6 py-4 sidebar-item-active gap-3" href="#">
+<iconify-icon class="text-xl" icon="mdi:vector-square"></iconify-icon>
+<span>区域管理</span>
+</a>
+<a class="flex items-center px-6 py-4 text-gray-400 hover:text-white hover:bg-[#242f42] transition-colors gap-3" href="#">
+<iconify-icon class="text-xl" icon="mdi:cog"></iconify-icon>
+<span>设置</span>
+</a>
+</nav>
+<div class="p-6 border-t border-gray-700">
+<div class="flex items-center gap-3">
+<div class="w-10 h-10 rounded-full bg-gray-600 overflow-hidden">
+<img alt="User Avatar" class="w-full h-full object-cover" src="/agent-py/static/source/images/placeholder.svg"/>
+</div>
+<div class="flex-1 overflow-hidden">
+<p class="text-white text-sm font-medium truncate">管理员</p>
+<p class="text-gray-500 text-xs truncate">admin@radar.sys</p>
+</div>
+</div>
+</div>
+</aside>
+<!-- 主体区域 -->
+<main class="flex-1 flex flex-col relative">
+<!-- 顶部标题栏 -->
+<header class="h-16 bg-white border-b border-[#BBCCDD] flex items-center justify-between px-6 z-40">
+<div class="flex items-center gap-4">
+<h1 class="text-lg font-bold text-[#1A2332]">区域配置</h1>
+<div class="h-4 w-[1px] bg-gray-300"></div>
+<span class="text-sm text-gray-500">当前设备: 远程雷达节点-04</span>
+</div>
+<div class="relative" id="menuDropdownContainer">
+<button class="w-10 h-10 flex items-center justify-center rounded-full hover:bg-gray-100 transition-colors text-gray-600" onclick="toggleMenu()">
+<iconify-icon class="text-2xl" icon="mdi:dots-vertical"></iconify-icon>
+</button>
+<!-- 下拉菜单 -->
+<div class="dropdown-menu absolute right-0 mt-2 w-56 bg-white rounded-lg shadow-xl border border-gray-200 overflow-hidden" id="dropdownMenu">
+<div class="py-1">
+<a class="flex items-center gap-3 px-4 py-3 text-sm text-gray-700 hover:bg-gray-50" href="#">
+<iconify-icon class="text-lg text-blue-600" icon="mdi:radar"></iconify-icon>
+<span>探测范围配置</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3 text-sm text-blue-600 bg-blue-50 font-medium" href="#">
+<iconify-icon class="text-lg" icon="mdi:vector-square"></iconify-icon>
+<span>区域配置</span>
+<iconify-icon class="ml-auto" icon="mdi:check"></iconify-icon>
+</a>
+<a class="flex items-center gap-3 px-4 py-3 text-sm text-gray-700 hover:bg-gray-50 border-b border-gray-100" href="#">
+<iconify-icon class="text-lg text-orange-500" icon="mdi:tune"></iconify-icon>
+<span>参数配置</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3 text-sm text-gray-700 hover:bg-gray-50" href="#">
+<iconify-icon class="text-lg text-gray-500" icon="mdi:export"></iconify-icon>
+<span>导出配置文件</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3 text-sm text-gray-700 hover:bg-gray-50" href="#">
+<iconify-icon class="text-lg text-gray-500" icon="mdi:import"></iconify-icon>
+<span>导入配置文件</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3 text-sm text-gray-700 hover:bg-gray-50" href="#">
+<iconify-icon class="text-lg text-gray-500" icon="mdi:file-cog-outline"></iconify-icon>
+<span>设置文件</span>
+</a>
+</div>
+</div>
+</div>
+</header>
+<!-- 画布工作区 -->
+<div class="flex-1 relative overflow-hidden bg-[#f8fafc]" id="canvasArea">
+<!-- 网格层 -->
+<div class="absolute inset-0 canvas-grid opacity-50" id="gridOverlay"></div>
+<!-- 背景图层 (模拟) -->
+<div class="absolute inset-0 hidden" id="backgroundImage">
+<img alt="Radar terrain map" class="w-full h-full object-cover opacity-30" src="/agent-py/static/source/images/placeholder.svg"/>
+</div>
+<!-- SVG 绘图层 -->
+<svg class="absolute inset-0 w-full h-full cursor-crosshair" id="svgCanvas">
+<!-- 动态生成的形状将插入此处 -->
+</svg>
+<!-- 浮动工具栏 -->
+<div class="absolute top-6 right-6 flex flex-col gap-4 z-30">
+<div class="bg-white rounded-lg panel-shadow border border-[#BBCCDD] p-2 flex gap-2">
+<button class="tool-btn flex flex-col items-center justify-center w-14 h-14 rounded-md hover:bg-gray-100 transition-colors text-[#2D4B8C]" id="tool-rect" onclick="setActiveTool('rect')">
+<iconify-icon class="text-2xl" icon="mdi:rectangle-outline"></iconify-icon>
+<span class="text-[10px] mt-1">矩形</span>
+</button>
+<button class="tool-btn flex flex-col items-center justify-center w-14 h-14 rounded-md hover:bg-gray-100 transition-colors text-gray-600" id="tool-polygon" onclick="setActiveTool('polygon')">
+<iconify-icon class="text-2xl" icon="mdi:hexagon-outline"></iconify-icon>
+<span class="text-[10px] mt-1">多边形</span>
+</button>
+<button class="tool-btn flex flex-col items-center justify-center w-14 h-14 rounded-md hover:bg-gray-100 transition-colors text-gray-600" id="tool-circle" onclick="setActiveTool('circle')">
+<iconify-icon class="text-2xl" icon="mdi:circle-outline"></iconify-icon>
+<span class="text-[10px] mt-1">圆形</span>
+</button>
+<button class="tool-btn flex flex-col items-center justify-center w-14 h-14 rounded-md hover:bg-gray-100 transition-colors text-gray-600" id="tool-curve" onclick="setActiveTool('curve')">
+<iconify-icon class="text-2xl" icon="mdi:vector-curve"></iconify-icon>
+<span class="text-[10px] mt-1">曲线</span>
+</button>
+<div class="w-[1px] bg-gray-200 mx-1"></div>
+<button class="flex flex-col items-center justify-center w-14 h-14 rounded-md hover:bg-gray-100 transition-colors text-[#2D4B8C]" id="tool-grid" onclick="toggleGrid()">
+<iconify-icon class="text-2xl" icon="mdi:grid"></iconify-icon>
+<span class="text-[10px] mt-1">网格</span>
+</button>
+<button class="flex flex-col items-center justify-center w-14 h-14 rounded-md hover:bg-gray-100 transition-colors text-gray-600" id="tool-bg" onclick="toggleBackground()">
+<iconify-icon class="text-2xl" icon="mdi:image-outline"></iconify-icon>
+<span class="text-[10px] mt-1">底图</span>
+</button>
+<button class="flex flex-col items-center justify-center w-14 h-14 rounded-md hover:bg-gray-100 transition-colors text-gray-600">
+<iconify-icon class="text-2xl" icon="mdi:crosshairs-gps"></iconify-icon>
+<span class="text-[10px] mt-1">对齐</span>
+</button>
+</div>
+<div class="bg-white rounded-lg panel-shadow border border-[#BBCCDD] p-2 flex justify-center gap-2">
+<button class="flex items-center gap-2 px-3 py-2 rounded hover:bg-gray-100 text-sm font-medium text-gray-700" onclick="togglePanel('list')">
+<iconify-icon class="text-lg" icon="mdi:view-list"></iconify-icon>
+<span>区域列表</span>
+</button>
+<button class="flex items-center gap-2 px-3 py-2 rounded hover:bg-gray-100 text-sm font-medium text-gray-700" onclick="togglePanel('edit')">
+<iconify-icon class="text-lg" icon="mdi:tune-vertical"></iconify-icon>
+<span>属性编辑</span>
+</button>
+</div>
+</div>
+<!-- 区域列表面板 (左侧浮动) -->
+<div class="absolute top-6 left-6 w-80 bg-white rounded-lg panel-shadow border border-[#BBCCDD] flex flex-col z-30 transition-all duration-300" id="listPanel">
+<div class="p-4 border-b border-gray-100 flex items-center justify-between">
+<h3 class="font-bold text-gray-800 flex items-center gap-2">
+<iconify-icon class="text-blue-600" icon="mdi:format-list-bulleted"></iconify-icon>
+                        区域列表
+                    </h3>
+<button class="bg-[#2D4B8C] hover:bg-[#1e3a75] text-white text-xs px-3 py-1.5 rounded flex items-center gap-1 transition-colors" onclick="addNewRegion()">
+<iconify-icon icon="mdi:plus"></iconify-icon>
+                        新增
+                    </button>
+</div>
+<div class="flex-1 overflow-y-auto max-h-[500px] custom-scrollbar" id="regionListItems">
+<!-- 列表项动态生成 -->
+</div>
+<div class="p-3 bg-gray-50 border-t border-gray-100 text-xs text-gray-500 flex justify-between">
+<span>总计: <span id="regionCount">3</span> 个区域</span>
+<span>已选: <span id="selectedCount">0</span></span>
+</div>
+</div>
+<!-- 属性编辑面板 (右侧浮动) -->
+<div class="absolute top-32 right-6 w-80 bg-white rounded-lg panel-shadow border border-[#BBCCDD] flex flex-col z-30 transform transition-all duration-300 translate-x-[120%] opacity-0" id="editPanel">
+<div class="p-4 border-b border-gray-100 flex items-center justify-between bg-gray-50 rounded-t-lg">
+<h3 class="font-bold text-gray-800 flex items-center gap-2">
+<iconify-icon class="text-blue-600" icon="mdi:square-edit-outline"></iconify-icon>
+                        属性编辑
+                    </h3>
+<button class="text-gray-400 hover:text-gray-600" onclick="closeEditPanel()">
+<iconify-icon class="text-xl" icon="mdi:close"></iconify-icon>
+</button>
+</div>
+<div class="p-5 space-y-5">
+<div>
+<label class="block text-xs font-semibold text-gray-500 uppercase mb-1.5">区域名称</label>
+<input class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all" id="edit-name" type="text"/>
+</div>
+<div class="grid grid-cols-2 gap-4">
+<div>
+<label class="block text-xs font-semibold text-gray-500 uppercase mb-1.5">灵敏度</label>
+<select class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500" id="edit-sensitivity">
+<option value="高">高</option>
+<option value="中">中</option>
+<option value="低">低</option>
+<option value="自定义">自定义</option>
+</select>
+</div>
+<div>
+<label class="block text-xs font-semibold text-gray-500 uppercase mb-1.5">报警等级</label>
+<select class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500" id="edit-level">
+<option value="1">等级 1</option>
+<option value="2">等级 2</option>
+<option value="3">等级 3</option>
+<option value="4">等级 4</option>
+<option value="5">等级 5</option>
+</select>
+</div>
+</div>
+<div>
+<label class="block text-xs font-semibold text-gray-500 uppercase mb-1.5">生效时间</label>
+<div class="flex items-center gap-2">
+<input class="flex-1 border border-gray-300 rounded px-2 py-1.5 text-xs" id="edit-start" type="time" value="08:00"/>
+<span class="text-gray-400">至</span>
+<input class="flex-1 border border-gray-300 rounded px-2 py-1.5 text-xs" id="edit-end" type="time" value="18:00"/>
+</div>
+</div>
+<div>
+<label class="block text-xs font-semibold text-gray-500 uppercase mb-1.5">颜色标记</label>
+<div class="flex flex-wrap gap-2.5" id="colorPicker">
+<button class="w-8 h-8 rounded-full border-2 border-transparent transition-all" onclick="setEditColor('#FF6B6B')" style="background-color: #FF6B6B;"></button>
+<button class="w-8 h-8 rounded-full border-2 border-transparent transition-all" onclick="setEditColor('#FFA94D')" style="background-color: #FFA94D;"></button>
+<button class="w-8 h-8 rounded-full border-2 border-transparent transition-all" onclick="setEditColor('#4DABF7')" style="background-color: #4DABF7;"></button>
+<button class="w-8 h-8 rounded-full border-2 border-transparent transition-all" onclick="setEditColor('#69DB7C')" style="background-color: #69DB7C;"></button>
+<button class="w-8 h-8 rounded-full border-2 border-transparent transition-all" onclick="setEditColor('#DA77F2')" style="background-color: #DA77F2;"></button>
+<button class="w-8 h-8 rounded-full border-2 border-transparent transition-all" onclick="setEditColor('#38D9A9')" style="background-color: #38D9A9;"></button>
+</div>
+</div>
+</div>
+<div class="p-4 bg-gray-50 border-t border-gray-100 flex gap-3 rounded-b-lg">
+<button class="flex-1 bg-[#2D4B8C] hover:bg-[#1e3a75] text-white py-2 rounded text-sm font-medium transition-colors" onclick="saveEdit()">保存更改</button>
+<button class="flex-1 bg-white border border-gray-300 text-gray-600 py-2 rounded text-sm font-medium hover:bg-gray-50 transition-colors" onclick="closeEditPanel()">取消</button>
+</div>
+</div>
+<!-- 底部状态提示 -->
+<div class="absolute bottom-6 left-1/2 -translate-x-1/2 bg-black/70 backdrop-blur-md text-white px-6 py-2.5 rounded-full text-sm z-20 flex items-center gap-3">
+<iconify-icon class="text-blue-400" icon="mdi:mouse-left-click-outline"></iconify-icon>
+<span>点击画布绘制区域，点击形状进行编辑</span>
+<div class="w-[1px] h-4 bg-white/20 mx-2"></div>
+<span class="text-white/60">当前工具: <span class="text-white font-medium" id="currentToolName">矩形工具</span></span>
+</div>
+</div>
+</main>
+<!-- 确认删除弹窗 -->
+<div class="fixed inset-0 bg-black/50 hidden items-center justify-center z-[100] backdrop-blur-sm" id="confirmModal">
+<div class="bg-white rounded-xl shadow-2xl w-[400px] p-6">
+<div class="flex items-center gap-4 text-orange-500 mb-4">
+<iconify-icon class="text-4xl" icon="mdi:alert-circle"></iconify-icon>
+<h4 class="text-xl font-bold text-gray-800">确认删除？</h4>
+</div>
+<p class="text-gray-600 mb-6">您确定要删除区域 <span class="font-bold text-gray-900" id="deleteTargetName"></span> 吗？此操作不可撤销。</p>
+<div class="flex justify-end gap-3">
+<button class="px-5 py-2 text-gray-500 hover:bg-gray-100 rounded-lg transition-colors" onclick="closeConfirmModal()">取消</button>
+<button class="px-5 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg shadow-md transition-colors" onclick="executeDelete()">确认删除</button>
+</div>
+</div>
+</div>
+<script>
+        // 初始数据
+        let regions = [
+            { id: 1, name: '核心警戒区-A', type: 'rect', visible: true, color: '#FF6B6B', sensitivity: '高', level: '5', start: '00:00', end: '23:59', points: '150,150 450,350' },
+            { id: 2, name: '外围监测区-B', type: 'polygon', visible: true, color: '#4DABF7', sensitivity: '中', level: '2', start: '08:00', end: '18:00', points: '550,100 750,150 700,350 500,300' },
+            { id: 3, name: '入口环形区', type: 'circle', visible: true, color: '#69DB7C', sensitivity: '低', level: '1', start: '06:00', end: '22:00', points: '300,500 80' }
+        ];
+
+        let activeTool = 'rect';
+        let selectedId = null;
+        let deleteId = null;
+        let isGridVisible = true;
+        let isBgVisible = false;
+
+        // 初始化
+        window.onload = () => {
+            renderRegions();
+            updateStats();
+            
+            // 点击画布空白处取消选中
+            document.getElementById('svgCanvas').addEventListener('click', (e) => {
+                if (e.target.id === 'svgCanvas') {
+                    selectRegion(null);
+                } else if (e.target.dataset.id) {
+                    selectRegion(parseInt(e.target.dataset.id));
+                }
+            });
+
+            // 点击外部关闭菜单
+            document.addEventListener('click', (e) => {
+                if (!document.getElementById('menuDropdownContainer').contains(e.target)) {
+                    document.getElementById('dropdownMenu').classList.remove('block');
+                    document.getElementById('dropdownMenu').classList.add('hidden');
+                }
+            });
+        };
+
+        // 渲染所有区域
+        function renderRegions() {
+            const svg = document.getElementById('svgCanvas');
+            const list = document.getElementById('regionListItems');
+            svg.innerHTML = '';
+            list.innerHTML = '';
+
+            regions.forEach(reg => {
+                if (reg.visible) {
+                    // 绘制 SVG
+                    let shape;
+                    if (reg.type === 'rect') {
+                        const pts = reg.points.split(' ');
+                        const p1 = pts[0].split(',');
+                        const p2 = pts[1].split(',');
+                        shape = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+                        shape.setAttribute("x", p1[0]);
+                        shape.setAttribute("y", p1[1]);
+                        shape.setAttribute("width", p2[0] - p1[0]);
+                        shape.setAttribute("height", p2[1] - p1[1]);
+                    } else if (reg.type === 'polygon') {
+                        shape = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
+                        shape.setAttribute("points", reg.points);
+                    } else if (reg.type === 'circle' || reg.type === 'curve') {
+                        const pts = reg.points.split(' ');
+                        const center = pts[0].split(',');
+                        shape = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+                        shape.setAttribute("cx", center[0]);
+                        shape.setAttribute("cy", center[1]);
+                        shape.setAttribute("r", pts[1]);
+                    }
+
+                    shape.setAttribute("fill", reg.color + "44"); // 25% 不透明度
+                    shape.setAttribute("stroke", reg.color);
+                    shape.setAttribute("stroke-width", "2");
+                    shape.setAttribute("data-id", reg.id);
+                    shape.setAttribute("class", "cursor-pointer transition-all " + (selectedId === reg.id ? "shape-selected" : ""));
+                    
+                    // 标签
+                    const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
+                    const pts = reg.points.split(' ');
+                    const first = pts[0].split(',');
+                    label.setAttribute("x", parseInt(first[0]) + 10);
+                    label.setAttribute("y", parseInt(first[1]) + 20);
+                    label.setAttribute("fill", "white");
+                    label.setAttribute("class", "text-[12px] font-bold shape-label");
+                    label.textContent = reg.name;
+                    
+                    const labelBg = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+                    labelBg.setAttribute("x", parseInt(first[0]) + 5);
+                    labelBg.setAttribute("y", parseInt(first[1]) + 5);
+                    labelBg.setAttribute("width", reg.name.length * 12 + 10);
+                    labelBg.setAttribute("height", "20");
+                    labelBg.setAttribute("fill", reg.color);
+                    labelBg.setAttribute("rx", "4");
+                    labelBg.setAttribute("class", "shape-label");
+
+                    svg.appendChild(shape);
+                    svg.appendChild(labelBg);
+                    svg.appendChild(label);
+                }
+
+                // 渲染列表项
+                const item = document.createElement('div');
+                item.className = `p-4 border-b border-gray-50 flex items-center gap-3 hover:bg-blue-50 transition-colors cursor-pointer ${selectedId === reg.id ? 'bg-blue-50 border-l-4 border-l-blue-500' : ''}`;
+                item.onclick = (e) => {
+                    if (e.target.tagName !== 'BUTTON' && e.target.tagName !== 'ICONIFY-ICON') {
+                        selectRegion(reg.id);
+                    }
+                };
+                
+                item.innerHTML = `
+                    <input type="checkbox" class="rounded text-blue-600 focus:ring-blue-500">
+                    <div class="flex-1 overflow-hidden">
+                        <div class="flex items-center gap-2">
+                            <span class="w-2 h-2 rounded-full" style="background-color: ${reg.color}"></span>
+                            <p class="text-sm font-medium text-gray-800 truncate">${reg.name}</p>
+                        </div>
+                        <div class="flex items-center gap-3 mt-1 text-[11px] text-gray-500">
+                            <span class="bg-gray-100 px-1.5 py-0.5 rounded">灵敏度:${reg.sensitivity}</span>
+                            <span>等级:${reg.level}</span>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-1">
+                        <button onclick="toggleVisibility(${reg.id})" class="p-1 hover:bg-gray-200 rounded text-gray-500">
+                            <iconify-icon icon="${reg.visible ? 'mdi:eye-outline' : 'mdi:eye-off-outline'}"></iconify-icon>
+                        </button>
+                        <button onclick="openEditPanel(${reg.id})" class="p-1 hover:bg-gray-200 rounded text-gray-500">
+                            <iconify-icon icon="mdi:pencil-outline"></iconify-icon>
+                        </button>
+                        <button onclick="confirmDelete(${reg.id})" class="p-1 hover:bg-red-100 rounded text-red-400">
+                            <iconify-icon icon="mdi:delete-outline"></iconify-icon>
+                        </button>
+                    </div>
+                `;
+                list.appendChild(item);
+            });
+        }
+
+        function updateStats() {
+            document.getElementById('regionCount').textContent = regions.length;
+            document.getElementById('selectedCount').textContent = selectedId ? 1 : 0;
+        }
+
+        // 交互逻辑
+        function setActiveTool(tool) {
+            activeTool = tool;
+            const names = { rect: '矩形工具', polygon: '多边形工具', circle: '圆形工具', curve: '曲线工具' };
+            document.getElementById('currentToolName').textContent = names[tool];
+            
+            // 切换按钮样式
+            document.querySelectorAll('.tool-btn').forEach(btn => {
+                btn.classList.remove('text-[#2D4B8C]', 'bg-blue-50');
+                btn.classList.add('text-gray-600');
+            });
+            document.getElementById('tool-' + tool).classList.add('text-[#2D4B8C]', 'bg-blue-50');
+            document.getElementById('tool-' + tool).classList.remove('text-gray-600');
+        }
+
+        function selectRegion(id) {
+            selectedId = id;
+            renderRegions();
+            updateStats();
+            if (id) {
+                openEditPanel(id);
+            } else {
+                closeEditPanel();
+            }
+        }
+
+        function toggleVisibility(id) {
+            const reg = regions.find(r => r.id === id);
+            if (reg) {
+                reg.visible = !reg.visible;
+                renderRegions();
+            }
+        }
+
+        function addNewRegion() {
+            const id = Date.now();
+            const x = Math.random() * 400 + 100;
+            const y = Math.random() * 300 + 100;
+            const colors = ['#FF6B6B', '#FFA94D', '#4DABF7', '#69DB7C', '#DA77F2', '#38D9A9'];
+            
+            let points = '';
+            if (activeTool === 'rect') points = `${x},${y} ${x+200},${y+150}`;
+            else if (activeTool === 'polygon') points = `${x},${y} ${x+150},${y+50} ${x+100},${y+200} ${x-50},${y+150}`;
+            else points = `${x},${y} 60`;
+
+            const newReg = {
+                id: id,
+                name: '新建区域-' + regions.length,
+                type: activeTool,
+                visible: true,
+                color: colors[regions.length % colors.length],
+                sensitivity: '中',
+                level: '1',
+                start: '08:00',
+                end: '18:00',
+                points: points
+            };
+            
+            regions.push(newReg);
+            selectRegion(id);
+        }
+
+        function confirmDelete(id) {
+            deleteId = id;
+            const reg = regions.find(r => r.id === id);
+            document.getElementById('deleteTargetName').textContent = reg.name;
+            document.getElementById('confirmModal').classList.remove('hidden');
+            document.getElementById('confirmModal').classList.add('flex');
+        }
+
+        function executeDelete() {
+            regions = regions.filter(r => r.id !== deleteId);
+            if (selectedId === deleteId) selectedId = null;
+            closeConfirmModal();
+            renderRegions();
+            updateStats();
+            closeEditPanel();
+        }
+
+        function closeConfirmModal() {
+            document.getElementById('confirmModal').classList.add('hidden');
+            document.getElementById('confirmModal').classList.remove('flex');
+        }
+
+        function openEditPanel(id) {
+            const reg = regions.find(r => r.id === id);
+            if (!reg) return;
+            
+            selectedId = id;
+            document.getElementById('edit-name').value = reg.name;
+            document.getElementById('edit-sensitivity').value = reg.sensitivity;
+            document.getElementById('edit-level').value = reg.level;
+            document.getElementById('edit-start').value = reg.start;
+            document.getElementById('edit-end').value = reg.end;
+            
+            // 设置颜色选择器状态
+            const picker = document.getElementById('colorPicker');
+            Array.from(picker.children).forEach(btn => {
+                if (btn.style.backgroundColor.toUpperCase() === reg.color.toUpperCase() || 
+                    rgbToHex(btn.style.backgroundColor).toUpperCase() === reg.color.toUpperCase()) {
+                    btn.classList.add('border-blue-500', 'scale-110');
+                } else {
+                    btn.classList.remove('border-blue-500', 'scale-110');
+                }
+            });
+
+            const panel = document.getElementById('editPanel');
+            panel.classList.remove('translate-x-[120%]', 'opacity-0');
+            renderRegions();
+        }
+
+        function closeEditPanel() {
+            const panel = document.getElementById('editPanel');
+            panel.classList.add('translate-x-[120%]', 'opacity-0');
+        }
+
+        function setEditColor(color) {
+            const reg = regions.find(r => r.id === selectedId);
+            if (reg) {
+                reg.color = color;
+                openEditPanel(selectedId);
+                renderRegions();
+            }
+        }
+
+        function saveEdit() {
+            const reg = regions.find(r => r.id === selectedId);
+            if (reg) {
+                reg.name = document.getElementById('edit-name').value;
+                reg.sensitivity = document.getElementById('edit-sensitivity').value;
+                reg.level = document.getElementById('edit-level').value;
+                reg.start = document.getElementById('edit-start').value;
+                reg.end = document.getElementById('edit-end').value;
+                renderRegions();
+                // 模拟保存成功
+                const btn = event.target;
+                const originalText = btn.textContent;
+                btn.textContent = '已保存 ✓';
+                btn.classList.replace('bg-[#2D4B8C]', 'bg-green-600');
+                setTimeout(() => {
+                    btn.textContent = originalText;
+                    btn.classList.replace('bg-green-600', 'bg-[#2D4B8C]');
+                }, 1500);
+            }
+        }
+
+        function toggleGrid() {
+            isGridVisible = !isGridVisible;
+            document.getElementById('gridOverlay').classList.toggle('hidden');
+            document.getElementById('tool-grid').classList.toggle('text-[#2D4B8C]');
+            document.getElementById('tool-grid').classList.toggle('text-gray-600');
+        }
+
+        function toggleBackground() {
+            isBgVisible = !isBgVisible;
+            document.getElementById('backgroundImage').classList.toggle('hidden');
+            document.getElementById('tool-bg').classList.toggle('text-[#2D4B8C]');
+            document.getElementById('tool-bg').classList.toggle('text-gray-600');
+        }
+
+        function toggleMenu() {
+            const menu = document.getElementById('dropdownMenu');
+            menu.classList.toggle('hidden');
+            menu.classList.toggle('block');
+        }
+
+        function togglePanel(type) {
+            if (type === 'list') {
+                const panel = document.getElementById('listPanel');
+                panel.classList.toggle('-translate-x-[120%]');
+                panel.classList.toggle('opacity-0');
+            } else {
+                if (selectedId) {
+                    const panel = document.getElementById('editPanel');
+                    panel.classList.toggle('translate-x-[120%]');
+                    panel.classList.toggle('opacity-0');
+                }
+            }
+        }
+
+        // 辅助工具
+        function rgbToHex(rgb) {
+            if (!rgb) return "";
+            if (rgb.startsWith('#')) return rgb;
+            const match = rgb.match(/^rgb\((\d+),\s*(\d+),\s*(\d+)\)$/);
+            if (!match) return rgb;
+            function hex(x) {
+                return ("0" + parseInt(x).toString(16)).slice(-2);
+            }
+            return "#" + hex(match[1]) + hex(match[2]) + hex(match[3]);
+        }
+    </script>
+</body>
+</html>

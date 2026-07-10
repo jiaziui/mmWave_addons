@@ -12,6 +12,10 @@ If this document conflicts with the code, the code wins. Read these files first:
 - `src/domain/mqttBridge.ts`
 - `src/routes/devices.ts`
 
+If you are adding a new device model, read:
+
+- `README_ADD_DEVICE_PROFILE.md`
+
 ## 1. Backend Role
 
 The backend is the service layer of the Home Assistant add-on.
@@ -63,8 +67,16 @@ Communication model:
   - per-device directory and JSON read/write
   - low-frequency snapshot throttling
 
-- `src/domain/c4004Profile.ts`
-  - C4004 entity mapping and discovery adaptation
+- `src/domain/profiles/deviceProfileCatalog.json`
+  - device profile configuration
+  - metadata hints, marker values, entity signatures, capabilities, MQTT topic rules
+
+- `src/domain/profiles/registry.ts`
+  - profile registration and discovery resolution
+  - metadata / marker / override / entity signature matching
+
+- `src/domain/profiles/builtinProfiles.ts`
+  - currently implemented runtime profile adapters
 
 - `src/domain/mmwaveService.ts`
   - core aggregation layer
@@ -156,14 +168,15 @@ Its role:
 
 Local JSON stores only low-frequency recoverable data:
 
-- device identity
-- binding info
+- device id and binding index
+- local configuration
 - MQTT routing info
 - region config
-- last low-frequency zone summary
 
 Local JSON does not store:
 
+- discovery status
+- zone snapshots
 - trajectory hex
 - parsed target points
 - MQTT connection state
@@ -189,8 +202,7 @@ Per-device directory:
 Fixed files inside each device directory:
 
 ```text
-device.json
-data.json
+config.json
 ```
 
 Notes:
@@ -198,44 +210,61 @@ Notes:
 - Legacy storage data is not migrated
 - Old single-file storage is not used anymore
 - Directory name uses the current stable `device.id`
+- `devices.json` is a binding index with stable device routing fields
 
-### 6.1 `device.json`
+### 6.1 `config.json`
 
-Purpose: low-frequency device metadata and configuration.
+Purpose: local device configuration and backend routing data required to operate the device.
 
 Fields:
 
 - `id`
 - `profileId`
+- `profileOverride`
 - `haDeviceId`
-- `name`
-- `model`
-- `manufacturer`
-- `firmwareVersion`
+- `macAddress`
+- `deploymentName`
 - `prefix`
 - `mqttTopicPrefix`
 - `mqttKey`
-- `macAddress`
-- `binding`
+- `installInfo`
+- `detectionMode`
 - `regionConfig`
 
-### 6.2 `data.json`
+`detectionMode` is numeric:
 
-Purpose: low-frequency recoverable runtime summary.
+```text
+1 = high sensitivity
+2 = static stable
+```
+
+### 6.2 Combined Runtime Object
+
+The service layer still works with full `StoredMmwaveDevice`, but it is now composed from `config.json`, live HA discovery, runtime cache, and the lightweight binding index.
+
+Internal persistence type:
+
+- `StoredDeviceMetaFile`
+
+### 6.3 `devices.json`
+
+Purpose: stable binding index and quick device list metadata.
 
 Fields:
 
-- `discovery`
-- `lastZoneSnapshot`
+- `version`
+- `nextSequence`
+- `devices[].id`
+- `devices[].deviceNo`
+- `devices[].haDeviceId`
+- `devices[].macAddress`
+- `devices[].prefix`
+- `devices[].mqttTopicPrefix`
+- `devices[].deploymentName`
+- `devices[].boundAt`
+- `devices[].updatedAt`
 
-### 6.3 Combined Runtime Object
-
-The service layer still works with full `StoredMmwaveDevice`, but it is now composed from two files instead of mapping directly to one JSON file.
-
-Internal persistence split types:
-
-- `StoredDeviceMetaFile`
-- `StoredDeviceDataFile`
+It intentionally does not duplicate volatile HA-discovered display details such as name, model, manufacturer, or firmware.
 
 ## 7. Write Strategy
 
@@ -244,29 +273,25 @@ Internal persistence split types:
 `replaceFromDiscovery()` will:
 
 - generate stable `device.id`
-- rewrite `device.json`
-- initialize or repair `data.json`
+- rewrite `config.json`
 - remove stale device directories that were not rediscovered
 
-### 7.2 Runtime Summary Write
+### 7.2 Runtime State
 
-`updateRuntimeState()` only persists low-frequency changes:
+Runtime state is not written to JSON.
 
-- `regionConfig` into `device.json`
-- `discovery` and `lastZoneSnapshot` into `data.json`
+- HA discovery identity and status go to `RuntimeCacheStore`
+- HA native zone/range snapshots go to `RuntimeCacheStore`
+- MQTT trajectory snapshots go to `RuntimeCacheStore`
 
-### 7.3 Throttling
-
-`lastZoneSnapshot` uses throttled writes:
-
-- minimum interval: 5 minutes
-- identical summary: no rewrite
-- trajectory changes never trigger file writes
+Only explicit device configuration changes should rewrite `config.json`.
 
 ## 8. Runtime Memory Model
 
-High-frequency runtime state stays in memory:
+Runtime state stays in memory:
 
+- HA discovery identity and online status
+- latest native zone snapshot
 - latest `TrajectorySnapshot`
 - parsed target point list
 - MQTT connection state
@@ -274,12 +299,12 @@ High-frequency runtime state stays in memory:
 
 Trajectory source of truth:
 
-- `MqttBridge.snapshots`
+- `RuntimeCacheStore`
 
 After backend restart:
 
-- region config and last zone summary can be restored from JSON
-- old trajectory points are not restored
+- `config.json` and `devices.json` restore device configuration and binding
+- online status, zone snapshots, identity details, and trajectory are empty until HA/MQTT refresh
 - live points appear only after new MQTT messages arrive
 
 ## 9. REST API
@@ -322,7 +347,14 @@ Current WebSocket is a periodic push model, not a pure event-stream model.
 
 ## 11. Current MQTT Subscription Rule
 
-The MQTT bridge subscribes per device using:
+The MQTT bridge subscribes per device through the resolved profile.
+Topic parts come from `src/domain/profiles/deviceProfileCatalog.json`:
+
+```text
+<mqttTopicPrefix>/<profile.mqttTopics.component>/<mqttKey>/<profile.mqttTopics.trajectoryStateTopic>
+```
+
+For the current C4004 profile this resolves to:
 
 ```text
 <mqttTopicPrefix>/dfrobot_c4004/<mqttKey>/state/target_trajectory
@@ -333,6 +365,13 @@ Matching logic:
 - topic is parsed first
 - backend matches `topicPrefix + mqttKey` back to stored device info
 - matched snapshot is cached in memory under `device.id`
+
+Planned MQTT bridge topics that are not implemented in this backend pass:
+
+- `state/multi_tag_config`: future low-frequency memory/config view
+- `state/learned_trajectory_range`: future low-frequency memory/config view
+- `state/config_file_range`: future low-frequency memory/config view
+- `command/*/set` and `result/*/set`: future command/result flow, not part of the current implementation
 
 ## 12. Recommended Frontend Assumptions
 
@@ -367,5 +406,6 @@ When using AI to continue backend or frontend work, keep these constraints expli
 - MQTT is only for trajectory-style live payloads
 - high-frequency trajectory must stay memory-only
 - storage root is `/homeassistant/dfrobot_mmwave`
-- each device uses `<deviceId>/device.json` and `<deviceId>/data.json`
+- each device uses `<deviceId>/config.json`
+- runtime state uses `RuntimeCacheStore`, not JSON files
 - frontend should consume backend DTOs directly instead of rebuilding entity graphs

@@ -1,11 +1,24 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { RangeBox, StoredRegionConfig, StoredRegionConfigRegion, StoredZoneSnapshot } from "../types/mmwave";
+import type {
+  C4004DeviceSettings,
+  RangeBox,
+  StoredRegionConfig,
+  StoredRegionConfigRegion,
+  StoredZoneSnapshot,
+} from "../types/mmwave";
+import {
+  isMmwaveProfileId,
+  isStoredMmwaveProfileId,
+  type MmwaveProfileId,
+  type ProfileSource,
+  type ProfileStatus,
+  type StoredMmwaveProfileId,
+} from "../types/profiles";
 
-const SNAPSHOT_WRITE_INTERVAL_MS = 5 * 60 * 1000;
 const BINDING_REGISTRY_FILE = "devices.json";
-const DEVICE_META_FILE = "device.json";
-const DEVICE_DATA_FILE = "data.json";
+const DEVICE_META_FILE = "config.json";
+const LEGACY_DEVICE_DATA_FILE = "data.json";
 const BINDING_REGISTRY_VERSION = 1;
 const DEFAULT_COORDINATE: RangeBox = { xMin: -5, xMax: 5, yMin: 0, yMax: 9 };
 const DEFAULT_REGION_POSITIONS = [
@@ -17,7 +30,7 @@ const DEFAULT_REGION_POSITIONS = [
   { x: 0, y: 1.8 },
 ];
 
-export type DetectionMode = "high_sensitivity" | "static_stable";
+export type DetectionMode = 1 | 2;
 
 export interface StoredInstallInfo {
   installMode: "side";
@@ -29,7 +42,10 @@ export interface StoredMmwaveDevice {
   id: string;
   deviceNo?: string;
   initialized: boolean;
-  profileId: "c4004";
+  profileId: StoredMmwaveProfileId;
+  profileSource?: ProfileSource;
+  profileStatus: ProfileStatus;
+  profileOverride?: MmwaveProfileId;
   haDeviceId?: string;
   name: string;
   deploymentName?: string;
@@ -45,6 +61,7 @@ export interface StoredMmwaveDevice {
   };
   installInfo?: StoredInstallInfo;
   detectionMode?: DetectionMode;
+  deviceSettings?: C4004DeviceSettings;
   discovery: {
     status: "online" | "offline";
     signal: number;
@@ -58,39 +75,24 @@ export interface StoredMmwaveDevice {
 
 export interface StoredDeviceMetaFile {
   id: string;
-  deviceNo?: string;
-  initialized?: boolean;
-  profileId: "c4004";
+  profileId: StoredMmwaveProfileId;
+  profileOverride?: MmwaveProfileId;
   haDeviceId?: string;
-  name: string;
+  macAddress?: string;
   deploymentName?: string;
-  model: string;
-  manufacturer?: string;
-  firmwareVersion?: string;
   prefix: string;
   mqttTopicPrefix: string;
   mqttKey: string;
-  macAddress: string;
-  binding: {
-    entityCount: number;
-  };
   installInfo?: StoredInstallInfo;
   detectionMode?: DetectionMode;
+  deviceSettings?: C4004DeviceSettings;
   regionConfig: StoredRegionConfig;
 }
 
-export interface StoredDeviceDataFile {
-  discovery: {
-    status: "online" | "offline";
-    signal: number;
-    lastSeen: string;
-    discoveredAt: string;
-    lastUpdated: string;
-  };
-  lastZoneSnapshot: StoredZoneSnapshot;
-}
-
 export interface DiscoveredMmwaveDeviceInput {
+  profileId: StoredMmwaveProfileId;
+  profileSource: ProfileSource;
+  profileStatus: ProfileStatus;
   haDeviceId?: string;
   name: string;
   deploymentName?: string;
@@ -117,17 +119,10 @@ export interface StoredDeviceBinding {
   deviceNo: string;
   id: string;
   haDeviceId?: string;
-  macAddress: string;
-  prefix: string;
-  mqttTopicPrefix: string;
-  mqttKey: string;
-  name: string;
+  macAddress?: string;
+  prefix?: string;
+  mqttTopicPrefix?: string;
   deploymentName?: string;
-  model: string;
-  manufacturer?: string;
-  firmwareVersion?: string;
-  installInfo: StoredInstallInfo;
-  detectionMode: DetectionMode;
   boundAt: string;
   updatedAt: string;
 }
@@ -145,21 +140,30 @@ const sanitizeIdPart = (value: string) =>
     .replace(/[^a-z0-9_-]+/g, "-")
     .replace(/^-+|-+$/g, "");
 
+const defaultModelForProfileId = (profileId: StoredMmwaveProfileId): string => {
+  if (profileId === "unknown") {
+    return "DFRobot mmWave";
+  }
+  return `DFRobot ${profileId.toUpperCase()}`;
+};
+
 const toStableDeviceId = (device: DiscoveredMmwaveDeviceInput) => {
+  const profilePrefix = device.profileId === "unknown" ? "mmwave" : device.profileId;
+  const prefixPart = sanitizeIdPart(device.prefix) || "device";
   if (device.haDeviceId) {
-    return `c4004-${sanitizeIdPart(device.haDeviceId)}`;
+    return `${profilePrefix}-${sanitizeIdPart(device.haDeviceId)}-${prefixPart}`;
   }
   if (device.macAddress) {
-    return `c4004-${sanitizeIdPart(device.macAddress)}`;
+    return `${profilePrefix}-${sanitizeIdPart(device.macAddress)}-${prefixPart}`;
   }
-  return `c4004-${sanitizeIdPart(device.prefix) || "device"}`;
+  return `${profilePrefix}-${prefixPart}`;
 };
 
 const formatDeviceNo = (sequence: number): string => String(sequence);
 
 const normalizeDeviceNo = (value: string): string => {
   const trimmed = value.trim();
-  const legacyMatch = /^C4004-(\d+)$/i.exec(trimmed);
+  const legacyMatch = /^C400\d-(\d+)$/i.exec(trimmed);
   const digits = legacyMatch?.[1] ?? trimmed.replace(/\D+/g, "");
   const parsed = Number(digits);
   return Number.isSafeInteger(parsed) && parsed > 0 ? String(parsed) : "";
@@ -178,8 +182,40 @@ const toFiniteNumber = (value: unknown, fallback: number): number => {
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 
-const normalizeDetectionMode = (value: unknown): DetectionMode =>
-  value === "static_stable" ? "static_stable" : "high_sensitivity";
+const toOptionalFiniteNumber = (value: unknown): number | undefined => {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+};
+
+const toOptionalBoolean = (value: unknown): boolean | undefined => {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "on" || normalized === "true" || normalized === "1") {
+    return true;
+  }
+  if (normalized === "off" || normalized === "false" || normalized === "0") {
+    return false;
+  }
+  return undefined;
+};
+
+const normalizeDetectionMode = (value: unknown): DetectionMode => {
+  if (value === 2 || value === "2" || value === "static_stable") {
+    return 2;
+  }
+  return 1;
+};
+
+const normalizeStoredProfileId = (value: unknown, fallback: StoredMmwaveProfileId = "c4004"): StoredMmwaveProfileId =>
+  isStoredMmwaveProfileId(value) ? value : fallback;
+
+const normalizeProfileOverride = (value: unknown): MmwaveProfileId | undefined =>
+  isMmwaveProfileId(value) ? value : undefined;
 
 const normalizeInstallInfo = (value: unknown): StoredInstallInfo => {
   const record = isRecord(value) ? value : {};
@@ -188,6 +224,45 @@ const normalizeInstallInfo = (value: unknown): StoredInstallInfo => {
     installAngleDeg: 0,
     installHeightM: normalizeInstallHeightM(record.installHeightM),
   };
+};
+
+const normalizeDeviceSettings = (value: unknown): C4004DeviceSettings | undefined => {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const settings: C4004DeviceSettings = {};
+  const booleanKeys = ["presenceEnable", "trajectoryTrackEnable", "trajectoryLed", "motionLed"] as const;
+  const numberKeys = [
+    "installZAngle",
+    "realTimePeopleTime",
+    "trackMeters",
+    "trackExistsTime",
+    "checkToActiveFrames",
+    "unmannedTime",
+    "zone1McuIo",
+    "zone2McuIo",
+    "zone3McuIo",
+    "zone4McuIo",
+    "zone5McuIo",
+    "zone6McuIo",
+  ] as const;
+
+  for (const key of booleanKeys) {
+    const parsed = toOptionalBoolean(value[key]);
+    if (parsed !== undefined) {
+      settings[key] = parsed;
+    }
+  }
+
+  for (const key of numberKeys) {
+    const parsed = toOptionalFiniteNumber(value[key]);
+    if (parsed !== undefined) {
+      settings[key] = parsed;
+    }
+  }
+
+  return Object.keys(settings).length ? settings : undefined;
 };
 
 const cloneRangeBox = (box: RangeBox): RangeBox => ({
@@ -238,6 +313,14 @@ const createEmptyZoneSnapshot = (updatedAt: string): StoredZoneSnapshot => ({
   },
 });
 
+const createDefaultDiscovery = (timestamp: string): StoredMmwaveDevice["discovery"] => ({
+  status: "offline",
+  signal: 0,
+  lastSeen: timestamp,
+  discoveredAt: timestamp,
+  lastUpdated: timestamp,
+});
+
 const normalizeRegionConfig = (value: unknown): StoredRegionConfig => {
   const fallback = createDefaultRegionConfig();
   if (!isRecord(value)) {
@@ -272,41 +355,6 @@ const normalizeRegionConfig = (value: unknown): StoredRegionConfig => {
   };
 };
 
-const normalizeZoneSnapshot = (value: unknown, fallbackTimestamp: string): StoredZoneSnapshot => {
-  const fallback = createEmptyZoneSnapshot(fallbackTimestamp);
-  if (!isRecord(value)) {
-    return fallback;
-  }
-
-  const rawPresenceStates = Array.isArray(value.presenceStates) ? value.presenceStates : [];
-  const presenceById = new Map<string, Record<string, unknown>>();
-  for (const entry of rawPresenceStates) {
-    if (!isRecord(entry) || typeof entry.id !== "string") {
-      continue;
-    }
-    presenceById.set(entry.id, entry);
-  }
-
-  const counts = isRecord(value.counts) ? value.counts : {};
-
-  return {
-    updatedAt: typeof value.updatedAt === "string" && value.updatedAt.trim() ? value.updatedAt : fallbackTimestamp,
-    presenceStates: fallback.presenceStates.map((entry) => {
-      const current = presenceById.get(entry.id);
-      return {
-        id: entry.id,
-        active: typeof current?.active === "boolean" ? current.active : entry.active,
-      };
-    }),
-    counts: {
-      peopleCount: toFiniteNumber(counts.peopleCount, 0),
-      targetCount: toFiniteNumber(counts.targetCount, 0),
-      movingCount: toFiniteNumber(counts.movingCount, 0),
-      staticCount: toFiniteNumber(counts.staticCount, 0),
-    },
-  };
-};
-
 const normalizeBinding = (value: unknown): StoredDeviceBinding | null => {
   if (!isRecord(value)) {
     return null;
@@ -314,8 +362,7 @@ const normalizeBinding = (value: unknown): StoredDeviceBinding | null => {
 
   const deviceNo = typeof value.deviceNo === "string" ? normalizeDeviceNo(value.deviceNo) : "";
   const id = typeof value.id === "string" && value.id.trim() ? value.id.trim() : "";
-  const prefix = typeof value.prefix === "string" && value.prefix.trim() ? value.prefix.trim() : "";
-  if (!deviceNo || !id || !prefix) {
+  if (!deviceNo || !id) {
     return null;
   }
 
@@ -324,27 +371,16 @@ const normalizeBinding = (value: unknown): StoredDeviceBinding | null => {
     deviceNo,
     id,
     haDeviceId: typeof value.haDeviceId === "string" && value.haDeviceId.trim() ? value.haDeviceId.trim() : undefined,
-    macAddress: typeof value.macAddress === "string" && value.macAddress.trim() ? value.macAddress.trim() : "Unknown",
-    prefix,
+    macAddress: typeof value.macAddress === "string" && value.macAddress.trim() ? value.macAddress.trim() : undefined,
+    prefix: typeof value.prefix === "string" && value.prefix.trim() ? value.prefix.trim() : undefined,
     mqttTopicPrefix:
       typeof value.mqttTopicPrefix === "string" && value.mqttTopicPrefix.trim()
         ? value.mqttTopicPrefix.trim()
-        : prefix,
-    mqttKey: typeof value.mqttKey === "string" && value.mqttKey.trim() ? value.mqttKey.trim() : "main",
-    name: typeof value.name === "string" && value.name.trim() ? value.name.trim() : prefix,
+        : undefined,
     deploymentName:
       typeof value.deploymentName === "string" && value.deploymentName.trim()
         ? value.deploymentName.trim()
         : undefined,
-    model: typeof value.model === "string" && value.model.trim() ? value.model.trim() : "DFRobot C4004",
-    manufacturer:
-      typeof value.manufacturer === "string" && value.manufacturer.trim() ? value.manufacturer.trim() : undefined,
-    firmwareVersion:
-      typeof value.firmwareVersion === "string" && value.firmwareVersion.trim()
-        ? value.firmwareVersion.trim()
-        : undefined,
-    installInfo: normalizeInstallInfo(value.installInfo),
-    detectionMode: normalizeDetectionMode(value.detectionMode),
     boundAt: typeof value.boundAt === "string" && value.boundAt.trim() ? value.boundAt.trim() : now,
     updatedAt: typeof value.updatedAt === "string" && value.updatedAt.trim() ? value.updatedAt.trim() : now,
   };
@@ -371,72 +407,38 @@ const normalizeBindingRegistry = (raw: unknown): DeviceBindingRegistryFile => {
   };
 };
 
-const isOnlineStatus = (value: unknown): value is "online" | "offline" => value === "online" || value === "offline";
-
 const normalizeMetaFile = (raw: unknown, fallbackId: string): StoredDeviceMetaFile | null => {
   if (!isRecord(raw)) {
     return null;
   }
 
+  const prefix = typeof raw.prefix === "string" && raw.prefix.trim() ? raw.prefix : fallbackId;
   return {
     id: typeof raw.id === "string" && raw.id.trim() ? raw.id : fallbackId,
-    deviceNo: typeof raw.deviceNo === "string" && raw.deviceNo.trim() ? normalizeDeviceNo(raw.deviceNo) : undefined,
-    initialized: typeof raw.initialized === "boolean" ? raw.initialized : undefined,
-    profileId: raw.profileId === "c4004" ? "c4004" : "c4004",
+    profileId: normalizeStoredProfileId(raw.profileId, "c4004"),
+    profileOverride: normalizeProfileOverride(raw.profileOverride),
     haDeviceId: typeof raw.haDeviceId === "string" && raw.haDeviceId.trim() ? raw.haDeviceId : undefined,
-    name: typeof raw.name === "string" && raw.name.trim() ? raw.name : fallbackId,
+    macAddress: typeof raw.macAddress === "string" && raw.macAddress.trim() ? raw.macAddress : undefined,
     deploymentName:
       typeof raw.deploymentName === "string" && raw.deploymentName.trim() ? raw.deploymentName : undefined,
-    model: typeof raw.model === "string" && raw.model.trim() ? raw.model : "DFRobot C4004",
-    manufacturer: typeof raw.manufacturer === "string" && raw.manufacturer.trim() ? raw.manufacturer : undefined,
-    firmwareVersion:
-      typeof raw.firmwareVersion === "string" && raw.firmwareVersion.trim() ? raw.firmwareVersion : undefined,
-    prefix: typeof raw.prefix === "string" && raw.prefix.trim() ? raw.prefix : fallbackId,
+    prefix,
     mqttTopicPrefix:
       typeof raw.mqttTopicPrefix === "string" && raw.mqttTopicPrefix.trim()
         ? raw.mqttTopicPrefix
-        : typeof raw.prefix === "string" && raw.prefix.trim()
-          ? raw.prefix
-          : fallbackId,
+        : prefix,
     mqttKey: typeof raw.mqttKey === "string" && raw.mqttKey.trim() ? raw.mqttKey : "main",
-    macAddress: typeof raw.macAddress === "string" && raw.macAddress.trim() ? raw.macAddress : "Unknown",
-    binding: {
-      entityCount: toFiniteNumber(isRecord(raw.binding) ? raw.binding.entityCount : undefined, 0),
-    },
     installInfo: isRecord(raw.installInfo) ? normalizeInstallInfo(raw.installInfo) : undefined,
     detectionMode:
-      raw.detectionMode === "high_sensitivity" || raw.detectionMode === "static_stable"
-        ? raw.detectionMode
+      raw.detectionMode === 1 ||
+      raw.detectionMode === 2 ||
+      raw.detectionMode === "1" ||
+      raw.detectionMode === "2" ||
+      raw.detectionMode === "high_sensitivity" ||
+      raw.detectionMode === "static_stable"
+        ? normalizeDetectionMode(raw.detectionMode)
         : undefined,
+    deviceSettings: normalizeDeviceSettings(raw.deviceSettings),
     regionConfig: normalizeRegionConfig(raw.regionConfig),
-  };
-};
-
-const normalizeDataFile = (
-  raw: unknown,
-  fallbackTimestamp: string,
-  fallbackStatus: "online" | "offline" = "offline",
-): StoredDeviceDataFile => {
-  const parsed = isRecord(raw) ? raw : {};
-  const discovery = isRecord(parsed.discovery) ? parsed.discovery : {};
-  const lastUpdated =
-    typeof discovery.lastUpdated === "string" && discovery.lastUpdated.trim()
-      ? discovery.lastUpdated
-      : fallbackTimestamp;
-
-  return {
-    discovery: {
-      status: isOnlineStatus(discovery.status) ? discovery.status : fallbackStatus,
-      signal: toFiniteNumber(discovery.signal, 0),
-      lastSeen:
-        typeof discovery.lastSeen === "string" && discovery.lastSeen.trim() ? discovery.lastSeen : lastUpdated,
-      discoveredAt:
-        typeof discovery.discoveredAt === "string" && discovery.discoveredAt.trim()
-          ? discovery.discoveredAt
-          : lastUpdated,
-      lastUpdated,
-    },
-    lastZoneSnapshot: normalizeZoneSnapshot(parsed.lastZoneSnapshot, lastUpdated),
   };
 };
 
@@ -454,38 +456,47 @@ const applyBindingToDevice = (
 
   return {
     ...device,
-    id: binding.id,
     deviceNo: binding.deviceNo,
     initialized: true,
-    haDeviceId: binding.haDeviceId ?? device.haDeviceId,
-    name: binding.name,
-    deploymentName: binding.deploymentName,
-    model: binding.model,
-    manufacturer: binding.manufacturer,
-    firmwareVersion: binding.firmwareVersion,
-    prefix: binding.prefix,
-    mqttTopicPrefix: binding.mqttTopicPrefix,
-    mqttKey: binding.mqttKey,
-    macAddress: binding.macAddress,
+    haDeviceId: device.haDeviceId ?? binding.haDeviceId,
+    macAddress: device.macAddress !== "Unknown" ? device.macAddress : binding.macAddress ?? "Unknown",
+    deploymentName: device.deploymentName ?? binding.deploymentName,
+    prefix: device.prefix || binding.prefix || device.id,
+    mqttTopicPrefix: device.mqttTopicPrefix || binding.mqttTopicPrefix || device.prefix,
     binding: {
       entityCount: Math.max(device.binding.entityCount, 1),
     },
-    installInfo: binding.installInfo,
-    detectionMode: binding.detectionMode,
   };
 };
 
 const combineStoredDevice = (
   meta: StoredDeviceMetaFile,
-  data: StoredDeviceDataFile,
   binding?: StoredDeviceBinding,
 ): StoredMmwaveDevice =>
   applyBindingToDevice(
     {
-      ...meta,
-      initialized: Boolean(meta.initialized),
-      discovery: data.discovery,
-      lastZoneSnapshot: data.lastZoneSnapshot,
+      id: meta.id,
+      initialized: false,
+      profileId: meta.profileId,
+      profileStatus: "resolved",
+      profileOverride: meta.profileOverride,
+      haDeviceId: meta.haDeviceId,
+      deploymentName: meta.deploymentName,
+      name: meta.prefix,
+      model: defaultModelForProfileId(meta.profileId),
+      prefix: meta.prefix,
+      mqttTopicPrefix: meta.mqttTopicPrefix,
+      mqttKey: meta.mqttKey,
+      macAddress: meta.macAddress ?? "Unknown",
+      binding: {
+        entityCount: 0,
+      },
+      installInfo: meta.installInfo,
+      detectionMode: meta.detectionMode,
+      deviceSettings: meta.deviceSettings,
+      discovery: createDefaultDiscovery(new Date().toISOString()),
+      regionConfig: meta.regionConfig,
+      lastZoneSnapshot: createEmptyZoneSnapshot(new Date().toISOString()),
     },
     binding,
   );
@@ -497,28 +508,19 @@ const createDeviceFromBinding = (binding: StoredDeviceBinding): StoredMmwaveDevi
     deviceNo: binding.deviceNo,
     initialized: true,
     profileId: "c4004",
+    profileStatus: "resolved",
     haDeviceId: binding.haDeviceId,
-    name: binding.name,
+    name: binding.id,
+    model: defaultModelForProfileId("c4004"),
     deploymentName: binding.deploymentName,
-    model: binding.model,
-    manufacturer: binding.manufacturer,
-    firmwareVersion: binding.firmwareVersion,
-    prefix: binding.prefix,
-    mqttTopicPrefix: binding.mqttTopicPrefix,
-    mqttKey: binding.mqttKey,
-    macAddress: binding.macAddress,
+    prefix: binding.prefix ?? binding.id,
+    mqttTopicPrefix: binding.mqttTopicPrefix ?? binding.prefix ?? binding.id,
+    mqttKey: "main",
+    macAddress: binding.macAddress ?? "Unknown",
     binding: {
       entityCount: 1,
     },
-    installInfo: binding.installInfo,
-    detectionMode: binding.detectionMode,
-    discovery: {
-      status: "offline",
-      signal: 0,
-      lastSeen: binding.updatedAt,
-      discoveredAt: binding.boundAt,
-      lastUpdated: now,
-    },
+    discovery: createDefaultDiscovery(now),
     regionConfig: createDefaultRegionConfig(),
     lastZoneSnapshot: createEmptyZoneSnapshot(now),
   };
@@ -528,35 +530,23 @@ const splitStoredDevice = (
   device: StoredMmwaveDevice,
 ): {
   meta: StoredDeviceMetaFile;
-  data: StoredDeviceDataFile;
 } => ({
   meta: {
     id: device.id,
-    deviceNo: device.deviceNo,
-    initialized: device.initialized,
     profileId: device.profileId,
+    profileOverride: device.profileOverride,
     haDeviceId: device.haDeviceId,
-    name: device.name,
+    macAddress: device.macAddress !== "Unknown" ? device.macAddress : undefined,
     deploymentName: device.deploymentName,
-    model: device.model,
-    manufacturer: device.manufacturer,
-    firmwareVersion: device.firmwareVersion,
     prefix: device.prefix,
     mqttTopicPrefix: device.mqttTopicPrefix,
     mqttKey: device.mqttKey,
-    macAddress: device.macAddress,
-    binding: device.binding,
     installInfo: device.installInfo,
     detectionMode: device.detectionMode,
+    deviceSettings: device.deviceSettings,
     regionConfig: device.regionConfig,
   },
-  data: {
-    discovery: device.discovery,
-    lastZoneSnapshot: device.lastZoneSnapshot,
-  },
 });
-
-const sameJson = (left: unknown, right: unknown): boolean => JSON.stringify(left) === JSON.stringify(right);
 
 export class DeviceStorage {
   constructor(private readonly dataDir: string) {}
@@ -611,8 +601,7 @@ export class DeviceStorage {
     const nextDevices: StoredMmwaveDevice[] = [];
     for (const [index, device] of devices.entries()) {
       const id = toStableDeviceId(device);
-      const matchingBinding = this.findBindingForDiscoveredDevice(registry, id, device);
-      const binding = matchingBinding ? { ...matchingBinding, id } : undefined;
+      const binding = this.findBindingForDiscoveredDevice(registry, id);
 
       if (!binding && device.status !== "online") {
         continue;
@@ -622,11 +611,14 @@ export class DeviceStorage {
       const nextDevice = {
         id,
         initialized: false,
-        profileId: "c4004" as const,
+        profileId: device.profileId,
+        profileSource: device.profileSource,
+        profileStatus: device.profileStatus,
+        profileOverride: existing?.profileOverride,
         haDeviceId: device.haDeviceId ?? existing?.haDeviceId,
-        name: device.name || `C4004 Device ${index + 1}`,
+        name: device.name || `${(device.profileId === "unknown" ? "mmwave" : device.profileId).toUpperCase()} Device ${index + 1}`,
         deploymentName: device.deploymentName ?? existing?.deploymentName,
-        model: device.model || "DFRobot C4004",
+        model: device.model || existing?.model || defaultModelForProfileId(device.profileId),
         manufacturer: device.manufacturer ?? existing?.manufacturer,
         firmwareVersion: device.firmwareVersion ?? existing?.firmwareVersion,
         prefix: device.prefix,
@@ -636,6 +628,7 @@ export class DeviceStorage {
         binding: {
           entityCount: device.entityCount,
         },
+        deviceSettings: existing?.deviceSettings,
         discovery: {
           status: device.status,
           signal: device.signal,
@@ -658,24 +651,11 @@ export class DeviceStorage {
     const normalizedRegistry = {
       ...registry,
       devices: registry.devices.map((binding) => {
-        const discovered = nextDevices.find(
-          (device) =>
-            binding.id === device.id ||
-            (binding.haDeviceId && binding.haDeviceId === device.haDeviceId) ||
-            (binding.macAddress !== "Unknown" && binding.macAddress === device.macAddress) ||
-            binding.prefix === device.prefix,
-        );
+        const discovered = nextDevices.find((device) => binding.id === device.id);
         if (!discovered) {
           return binding;
         }
-        return this.createBindingFromDevice(
-          discovered,
-          binding.deviceNo,
-          binding.installInfo,
-          binding.detectionMode,
-          binding.boundAt,
-          now,
-        );
+        return this.createBindingFromDevice(discovered, binding.deviceNo, binding.boundAt, now);
       }),
     };
     this.writeBindingRegistry(normalizedRegistry);
@@ -700,94 +680,17 @@ export class DeviceStorage {
       fs.rmSync(this.getDeviceDir(entry.name), { recursive: true, force: true });
     }
 
-    return this.listDevices();
-  }
-
-  updateRuntimeState(
-    current: StoredMmwaveDevice,
-    updates: {
-      regionConfig?: StoredRegionConfig;
-      lastZoneSnapshot?: StoredZoneSnapshot;
-    },
-    options?: {
-      forceSnapshot?: boolean;
-    },
-  ): StoredMmwaveDevice {
-    let nextRegionConfig = current.regionConfig;
-    let nextZoneSnapshot = current.lastZoneSnapshot;
-
-    if (updates.regionConfig) {
-      nextRegionConfig = normalizeRegionConfig(updates.regionConfig);
+    const devicesById = new Map(this.listDevices().map((device) => [device.id, device]));
+    for (const device of nextDevices) {
+      devicesById.set(device.id, device);
     }
 
-    if (updates.lastZoneSnapshot) {
-      const normalizedSnapshot = normalizeZoneSnapshot(
-        updates.lastZoneSnapshot,
-        updates.lastZoneSnapshot.updatedAt || new Date().toISOString(),
-      );
-      const snapshotChanged = !sameJson(normalizedSnapshot, current.lastZoneSnapshot);
-      if (snapshotChanged) {
-        const previousUpdatedAt = Date.parse(current.lastZoneSnapshot.updatedAt);
-        const canWriteSnapshot =
-          options?.forceSnapshot ||
-          !Number.isFinite(previousUpdatedAt) ||
-          Date.now() - previousUpdatedAt >= SNAPSHOT_WRITE_INTERVAL_MS;
-
-        if (canWriteSnapshot) {
-          nextZoneSnapshot = normalizedSnapshot;
-        }
+    return [...devicesById.values()].sort((left, right) => {
+      if (left.initialized !== right.initialized) {
+        return left.initialized ? -1 : 1;
       }
-    }
-
-    const regionChanged = !sameJson(nextRegionConfig, current.regionConfig);
-    const zoneSnapshotChanged = !sameJson(nextZoneSnapshot, current.lastZoneSnapshot);
-    if (!regionChanged && !zoneSnapshotChanged) {
-      return current;
-    }
-
-    const nextDevice: StoredMmwaveDevice = {
-      ...current,
-      discovery: {
-        ...current.discovery,
-        lastUpdated: new Date().toISOString(),
-      },
-      regionConfig: nextRegionConfig,
-      lastZoneSnapshot: nextZoneSnapshot,
-    };
-    this.saveDevice(nextDevice);
-    return nextDevice;
-  }
-
-  updateDiscoveryStatuses(
-    statusesByPrefix: Map<string, "online" | "offline">,
-    timestamp = new Date().toISOString(),
-  ): StoredMmwaveDevice[] {
-    const devices = this.listDevices();
-    for (const device of devices) {
-      const status = statusesByPrefix.get(device.prefix);
-      if (!status) {
-        continue;
-      }
-
-      const statusChanged = device.discovery.status !== status;
-      const nextLastSeen = status === "online" ? timestamp : device.discovery.lastSeen;
-      const lastSeenChanged = device.discovery.lastSeen !== nextLastSeen;
-      if (!statusChanged && !lastSeenChanged) {
-        continue;
-      }
-
-      this.saveDevice({
-        ...device,
-        discovery: {
-          ...device.discovery,
-          status,
-          lastSeen: nextLastSeen,
-          lastUpdated: timestamp,
-        },
-      });
-    }
-
-    return this.listDevices();
+      return (left.deviceNo ?? left.name).localeCompare(right.deviceNo ?? right.name);
+    });
   }
 
   validateInitializeDevice(id: string, updates: InitializeDeviceInput): StoredMmwaveDevice {
@@ -823,6 +726,11 @@ export class DeviceStorage {
       },
       installInfo,
       detectionMode: updates.detectionMode,
+      deviceSettings: {
+        ...current.deviceSettings,
+        checkToActiveFrames: updates.detectionMode === 1 ? 2 : 7,
+        unmannedTime: updates.detectionMode === 1 ? 5 : 30,
+      },
       discovery: {
         ...current.discovery,
         lastUpdated: now,
@@ -833,8 +741,6 @@ export class DeviceStorage {
     const nextBinding = this.createBindingFromDevice(
       nextDevice,
       deviceNo,
-      installInfo,
-      updates.detectionMode,
       existingBinding?.boundAt ?? now,
       now,
     );
@@ -848,6 +754,28 @@ export class DeviceStorage {
     };
 
     this.writeBindingRegistry(nextRegistry);
+    this.saveDevice(nextDevice);
+    return nextDevice;
+  }
+
+  updateDeviceSettings(id: string, settings: C4004DeviceSettings): StoredMmwaveDevice {
+    const current = this.getDevice(id);
+    if (!current) {
+      throw new Error("Device not found");
+    }
+    const normalizedSettings = normalizeDeviceSettings(settings) ?? {};
+
+    const nextDevice: StoredMmwaveDevice = {
+      ...current,
+      deviceSettings: {
+        ...current.deviceSettings,
+        ...normalizedSettings,
+      },
+      discovery: {
+        ...current.discovery,
+        lastUpdated: new Date().toISOString(),
+      },
+    };
     this.saveDevice(nextDevice);
     return nextDevice;
   }
@@ -869,22 +797,13 @@ export class DeviceStorage {
   private findBindingForDiscoveredDevice(
     registry: DeviceBindingRegistryFile,
     id: string,
-    device: DiscoveredMmwaveDeviceInput,
   ): StoredDeviceBinding | undefined {
-    return registry.devices.find(
-      (binding) =>
-        binding.id === id ||
-        (device.haDeviceId && binding.haDeviceId === device.haDeviceId) ||
-        (device.macAddress && binding.macAddress !== "Unknown" && binding.macAddress === device.macAddress) ||
-        binding.prefix === device.prefix,
-    );
+    return registry.devices.find((binding) => binding.id === id);
   }
 
   private createBindingFromDevice(
     device: StoredMmwaveDevice,
     deviceNo: string,
-    installInfo: StoredInstallInfo,
-    detectionMode: DetectionMode,
     boundAt: string,
     updatedAt: string,
   ): StoredDeviceBinding {
@@ -892,17 +811,10 @@ export class DeviceStorage {
       deviceNo,
       id: device.id,
       haDeviceId: device.haDeviceId,
-      macAddress: device.macAddress,
+      macAddress: device.macAddress !== "Unknown" ? device.macAddress : undefined,
       prefix: device.prefix,
       mqttTopicPrefix: device.mqttTopicPrefix,
-      mqttKey: device.mqttKey,
-      name: device.name,
       deploymentName: device.deploymentName,
-      model: device.model,
-      manufacturer: device.manufacturer,
-      firmwareVersion: device.firmwareVersion,
-      installInfo,
-      detectionMode,
       boundAt,
       updatedAt,
     };
@@ -1002,8 +914,8 @@ export class DeviceStorage {
     return path.join(this.getDeviceDir(id), DEVICE_META_FILE);
   }
 
-  private getDeviceDataPath(id: string): string {
-    return path.join(this.getDeviceDir(id), DEVICE_DATA_FILE);
+  private getLegacyDeviceDataPath(id: string): string {
+    return path.join(this.getDeviceDir(id), LEGACY_DEVICE_DATA_FILE);
   }
 
   private readDevice(
@@ -1017,16 +929,7 @@ export class DeviceStorage {
         return null;
       }
 
-      const fallbackTimestamp = new Date().toISOString();
-      let data = normalizeDataFile(null, fallbackTimestamp);
-      try {
-        const rawData = fs.readFileSync(this.getDeviceDataPath(id), "utf8");
-        data = normalizeDataFile(JSON.parse(rawData) as unknown, fallbackTimestamp, data.discovery.status);
-      } catch {
-        data = normalizeDataFile(null, fallbackTimestamp);
-      }
-
-      return combineStoredDevice(meta, data, bindingsById.get(meta.id));
+      return combineStoredDevice(meta, bindingsById.get(meta.id));
     } catch {
       return null;
     }
@@ -1037,8 +940,8 @@ export class DeviceStorage {
     const deviceDir = this.getDeviceDir(device.id);
     fs.mkdirSync(deviceDir, { recursive: true });
 
-    const { meta, data } = splitStoredDevice(device);
+    const { meta } = splitStoredDevice(device);
     fs.writeFileSync(this.getDeviceMetaPath(device.id), JSON.stringify(meta, null, 2), "utf8");
-    fs.writeFileSync(this.getDeviceDataPath(device.id), JSON.stringify(data, null, 2), "utf8");
+    fs.rmSync(this.getLegacyDeviceDataPath(device.id), { force: true });
   }
 }

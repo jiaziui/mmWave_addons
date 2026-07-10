@@ -1,0 +1,49 @@
+{
+    "profiles": [
+        {
+            "id": "c4004",
+            "displayName": "DFRobot C4004",
+            "metadataHints": ["c4004", "dfrobot c4004", "dfrobot_c4004"],
+            "markerValues": ["c4004"],
+            "runtimeSupported": true,
+            "capabilities": {
+                "supportsTrajectory": true,
+                "supportsRegions": true,
+                "supportsInitializeWorkflow": true,
+                "supportsReset": true,
+                "supportsMqttBridge": true
+            },
+            "mqttTopics": {
+                "component": "dfrobot_c4004",
+                "trajectoryStateTopic": "state/target_trajectory"
+            },
+            "entitySignature": {
+                "minScore": 4,
+                "entities": [
+                    { "domain": "binary_sensor", "slug": "online" },
+                    { "domain": "binary_sensor", "slug": "presence" },
+                    { "domain": "sensor", "slug": "people_count" },
+                    { "domain": "sensor", "slug": "target_count" },
+                    { "domain": "sensor", "slug": "motion_state" },
+                    { "domain": "binary_sensor", "slug": "zone_1_presence" },
+                    { "domain": "binary_sensor", "slug": "zone_2_presence" },
+                    { "domain": "binary_sensor", "slug": "zone_3_presence" },
+                    { "domain": "binary_sensor", "slug": "zone_4_presence" },
+                    { "domain": "binary_sensor", "slug": "zone_5_presence" },
+                    { "domain": "binary_sensor", "slug": "zone_6_presence" },
+                    { "domain": "sensor", "slug": "zone_1_moving_count" },
+                    { "domain": "sensor", "slug": "zone_1_static_count" },
+                    { "domain": "text_sensor", "slug": "detection_range_mode" },
+                    { "domain": "text_sensor", "slug": "status" },
+                    { "domain": "select", "slug": "install_mode" },
+                    { "domain": "number", "slug": "install_height" },
+                    { "domain": "number", "slug": "range_x_min" },
+                    { "domain": "number", "slug": "range_x_max" },
+                    { "domain": "number", "slug": "range_y_min" },
+                    { "domain": "number", "slug": "range_y_max" },
+                    { "domain": "button", "slug": "reset" }
+                ]
+            }
+        }
+    ]
+}

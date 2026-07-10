@@ -27,6 +27,25 @@ export interface StoredRegionConfig {
   regions: StoredRegionConfigRegion[];
 }
 
+export interface C4004DeviceSettings {
+  presenceEnable?: boolean;
+  trajectoryTrackEnable?: boolean;
+  trajectoryLed?: boolean;
+  motionLed?: boolean;
+  installZAngle?: number;
+  realTimePeopleTime?: number;
+  trackMeters?: number;
+  trackExistsTime?: number;
+  checkToActiveFrames?: number;
+  unmannedTime?: number;
+  zone1McuIo?: number;
+  zone2McuIo?: number;
+  zone3McuIo?: number;
+  zone4McuIo?: number;
+  zone5McuIo?: number;
+  zone6McuIo?: number;
+}
+
 export interface StoredZoneSnapshot {
   updatedAt: string;
   presenceStates: Array<{ id: string; active: boolean }>;
