@@ -98,7 +98,6 @@ const cloneConfig = (config: StoredRegionConfig): StoredRegionConfig => structur
 const centerOf = (geometry: RegionGeometry) => ({ x: geometry.centerXCm, y: geometry.centerYCm });
 /** Stable place width so every asset lands at the same physical size (aspect from image). */
 const BACKGROUND_PLACE_WIDTH_CM = 200;
-const BACKGROUND_WHEEL_STEP_PX = 48;
 const readImageNaturalSize = (url: string): Promise<{ width: number; height: number }> => new Promise((resolve) => {
   const image = new Image();
   image.onload = () => resolve({
@@ -125,6 +124,7 @@ type BackgroundCatalogItem = {
   naturalWidth?: number;
   naturalHeight?: number;
 };
+type BackgroundCatalogFilter = "all" | "system" | "user";
 
 const systemAssets: LibraryAsset[] = Object.entries(systemModules).map(([filePath, url]) => ({
   id: filePath.split("/").pop()?.replace(/\.[^.]+$/, "") ?? filePath,
@@ -163,6 +163,7 @@ export function RegionManagementPage({
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; label: string } | null>(null);
   const [importedBackgroundSources, setImportedBackgroundSources] = useState<ImportedBackgroundSource[]>([]);
   const [selectedImportedSourceId, setSelectedImportedSourceId] = useState<string | null>(null);
+  const [backgroundFilter, setBackgroundFilter] = useState<BackgroundCatalogFilter>("all");
   const [backgroundMessage, setBackgroundMessage] = useState("可导入图片并添加到坐标系");
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -184,11 +185,22 @@ export function RegionManagementPage({
   const viewportCenteredRef = useRef(false);
   const pointerMoveFrameRef = useRef<number | null>(null);
   const pendingPointerMoveRef = useRef<PointerMoveSample | null>(null);
+  const regionEditBaselineRef = useRef<RegionDefinition | null>(null);
+  const regionEditIsNewRef = useRef(false);
+  const dirtyBeforeRegionEditRef = useRef(false);
+  const regionDraftRef = useRef<RegionDefinition | null>(null);
+  const detectionBaselineRef = useRef<{
+    detection: StoredRegionConfig["detection"];
+    rangeBox: StoredRegionConfig["rangeBox"];
+  } | null>(null);
+  const dirtyBeforeDetectionEditRef = useRef(false);
 
   const setCurrentConfig = (next: MmwaveDeviceConfig | null) => {
     configRef.current = next;
     setDeviceConfig(next);
   };
+
+  regionDraftRef.current = regionDraft;
 
   useEffect(() => {
     if (boundDevices[0] && !boundDevices.some((device) => device.id === selectedDeviceId)) {
@@ -206,6 +218,11 @@ export function RegionManagementPage({
     setLoading(true);
     setSelectedRegionId(null);
     setSelectedBackgroundId(null);
+    setRegionDraft(null);
+    regionEditBaselineRef.current = null;
+    regionEditIsNewRef.current = false;
+    regionDraftRef.current = null;
+    detectionBaselineRef.current = null;
     setActivePanel(null);
     setDevicePickerOpen(false);
     viewportCenteredRef.current = false;
@@ -363,17 +380,106 @@ export function RegionManagementPage({
     }
   };
 
-  const togglePanel = (panel: Exclude<Panel, "edit">) => {
-    setActivePanel((current) => current === panel ? null : panel);
+  const clearRegionEditSession = () => {
+    regionEditBaselineRef.current = null;
+    regionEditIsNewRef.current = false;
+    regionDraftRef.current = null;
     setRegionDraft(null);
     setSelectedRegionId(null);
-    if (panel === "background") {
-      setBackgroundVisible(true);
-    }
-    if (panel !== "background") setSelectedBackgroundId(null);
   };
 
-  const selectRegion = (region: RegionDefinition) => {
+  const discardRegionEdits = (options?: { nextPanel?: Panel | "keep" }) => {
+    const current = configRef.current;
+    const baseline = regionEditBaselineRef.current;
+    if (current && baseline) {
+      const next = cloneConfig(current.regionConfig);
+      if (regionEditIsNewRef.current) {
+        next.regions = next.regions.filter((region) => region.id !== baseline.id);
+      } else {
+        const targetIndex = next.regions.findIndex((region) => region.id === baseline.id);
+        if (targetIndex >= 0) next.regions[targetIndex] = structuredClone(baseline);
+      }
+      setCurrentConfig({ ...current, regionConfig: next });
+      setDirty(dirtyBeforeRegionEditRef.current);
+    }
+    clearRegionEditSession();
+    if (options?.nextPanel !== "keep") {
+      setActivePanel(options?.nextPanel ?? "regions");
+    }
+  };
+
+  const refreshDetectionBaseline = () => {
+    const current = configRef.current;
+    if (!current) return;
+    detectionBaselineRef.current = {
+      detection: structuredClone(current.regionConfig.detection),
+      rangeBox: structuredClone(current.regionConfig.rangeBox),
+    };
+    dirtyBeforeDetectionEditRef.current = false;
+  };
+
+  const discardDetectionEdits = () => {
+    const current = configRef.current;
+    const baseline = detectionBaselineRef.current;
+    if (current && baseline) {
+      const next = cloneConfig(current.regionConfig);
+      next.detection = structuredClone(baseline.detection);
+      next.rangeBox = structuredClone(baseline.rangeBox);
+      setCurrentConfig({ ...current, regionConfig: next });
+      setDirty(dirtyBeforeDetectionEditRef.current);
+    }
+    detectionBaselineRef.current = null;
+  };
+
+  const beginDetectionEdit = () => {
+    const current = configRef.current;
+    if (!current) return;
+    const next = cloneConfig(current.regionConfig);
+    if (next.detection.appliedMode) {
+      next.detection.mode = next.detection.appliedMode;
+    }
+    setCurrentConfig({ ...current, regionConfig: next });
+    detectionBaselineRef.current = {
+      detection: structuredClone(next.detection),
+      rangeBox: structuredClone(next.rangeBox),
+    };
+    dirtyBeforeDetectionEditRef.current = dirty;
+  };
+
+  const togglePanel = (panel: Exclude<Panel, "edit">) => {
+    if (regionDraftRef.current || regionEditBaselineRef.current) {
+      discardRegionEdits({ nextPanel: "keep" });
+    }
+    const next = activePanel === panel ? null : panel;
+    if (activePanel === "detection" && next !== "detection") {
+      discardDetectionEdits();
+    }
+    setActivePanel(next);
+    clearRegionEditSession();
+    if (next === "detection") {
+      beginDetectionEdit();
+    }
+    if (next === "background") {
+      setBackgroundVisible(true);
+    }
+    if (next !== "background") setSelectedBackgroundId(null);
+  };
+
+  const selectRegion = (region: RegionDefinition, options?: { isNew?: boolean; dirtyBefore?: boolean }) => {
+    if (regionDraftRef.current?.id === region.id && activePanel === "edit" && !options?.isNew) {
+      setSelectedRegionId(region.id);
+      setActivePanel("edit");
+      return;
+    }
+    if (activePanel === "detection" || detectionBaselineRef.current) {
+      discardDetectionEdits();
+    }
+    if (regionDraftRef.current && regionDraftRef.current.id !== region.id) {
+      discardRegionEdits({ nextPanel: "keep" });
+    }
+    dirtyBeforeRegionEditRef.current = options?.dirtyBefore ?? dirty;
+    regionEditIsNewRef.current = Boolean(options?.isNew);
+    regionEditBaselineRef.current = structuredClone(region);
     setSelectedRegionId(region.id);
     setRegionDraft(structuredClone(region));
     setActivePanel("edit");
@@ -388,6 +494,7 @@ export function RegionManagementPage({
     if (!regionConfig || readOnly || regionConfig.regions.length >= 32) return;
     const index = findAvailableRegionIndex(regionConfig.regions);
     if (index === null) return;
+    const wasDirty = dirty;
     const scale = cellSize / 50;
     const centerX = Math.round((canvasSize.width / 2 - viewportOffset.x) / scale);
     const centerY = Math.round((viewportOffset.y - canvasSize.height / 2) / scale);
@@ -407,8 +514,8 @@ export function RegionManagementPage({
     const next = cloneConfig(regionConfig);
     next.regions.push(region);
     setCurrentConfig({ ...deviceConfig!, regionConfig: next });
+    selectRegion(region, { isNew: true, dirtyBefore: wasDirty });
     setDirty(true);
-    selectRegion(region);
   };
 
   const saveRegionDraft = async () => {
@@ -425,8 +532,8 @@ export function RegionManagementPage({
     else next.regions.push(normalizedDraft);
     const saved = await persistRegionConfig(next, { regionMcuIo: normalizedDraft.regionType === "status_detection" && normalizedDraft.index < 6 });
     if (saved) {
+      clearRegionEditSession();
       setSelectedRegionId(normalizedDraft.id);
-      setRegionDraft(null);
       setActivePanel("regions");
     }
   };
@@ -441,8 +548,7 @@ export function RegionManagementPage({
     const next = cloneConfig(regionConfig);
     next.regions = next.regions.filter((region) => region.id !== deleteTarget.id);
     await persistRegionConfig(next);
-    setSelectedRegionId(null);
-    setRegionDraft(null);
+    clearRegionEditSession();
     setActivePanel("regions");
     setDeleteTarget(null);
   };
@@ -472,8 +578,7 @@ export function RegionManagementPage({
       const next = cloneConfig(regionConfig);
       next.regions = regions;
       await persistRegionConfig(next);
-      setSelectedRegionId(null);
-      setRegionDraft(null);
+      clearRegionEditSession();
       setActivePanel("regions");
       onMessage("标签区域配置已导入");
     } catch (error) {
@@ -526,18 +631,29 @@ export function RegionManagementPage({
     })),
   ];
 
+  const selectedBackgroundKey = selectedImportedSourceId
+    ? `imported:${selectedImportedSourceId}`
+    : selectedAssetId
+      ? `asset:${selectedAssetId}`
+      : null;
+
   const currentCatalogIndex = (() => {
-    const key = selectedImportedSourceId
-      ? `imported:${selectedImportedSourceId}`
-      : selectedAssetId
-        ? `asset:${selectedAssetId}`
-        : null;
-    if (!key) return backgroundCatalog.length ? 0 : -1;
-    const index = backgroundCatalog.findIndex((item) => item.key === key);
+    if (!selectedBackgroundKey) return backgroundCatalog.length ? 0 : -1;
+    const index = backgroundCatalog.findIndex((item) => item.key === selectedBackgroundKey);
     return index >= 0 ? index : backgroundCatalog.length ? 0 : -1;
   })();
 
   const currentCatalogItem = currentCatalogIndex >= 0 ? backgroundCatalog[currentCatalogIndex] : null;
+  const visibleBackgroundCatalog = backgroundCatalog.filter((item) => {
+    if (backgroundFilter === "all") return true;
+    if (backgroundFilter === "user") return item.kind === "imported";
+    return item.kind === "asset";
+  });
+  const backgroundFilterOptions: Array<{ id: BackgroundCatalogFilter; label: string; count: number }> = [
+    { id: "all", label: "全部", count: backgroundCatalog.length },
+    { id: "system", label: "官方", count: libraryAssets.length },
+    { id: "user", label: "已上传", count: importedBackgroundSources.length },
+  ];
 
   const selectBackgroundSourceByKey = (key: string) => {
     if (key.startsWith("imported:")) {
@@ -547,14 +663,7 @@ export function RegionManagementPage({
       setSelectedAssetId(key.slice("asset:".length));
       setSelectedImportedSourceId(null);
     }
-    setBackgroundMessage("左右翻页浏览素材，点「添加」或双击放入画布（统一约 2m 宽）");
-  };
-
-  const stepBackgroundCatalog = (delta: number) => {
-    if (!backgroundCatalog.length) return;
-    const base = currentCatalogIndex >= 0 ? currentCatalogIndex : 0;
-    const nextIndex = (base + delta + backgroundCatalog.length) % backgroundCatalog.length;
-    selectBackgroundSourceByKey(backgroundCatalog[nextIndex].key);
+    setBackgroundMessage("已选中素材，点「添加」或双击卡片放入画布（统一约 2m 宽）");
   };
 
   const placeBackgroundItem = async (item: BackgroundCatalogItem) => {
@@ -609,8 +718,12 @@ export function RegionManagementPage({
     if (activePanel !== "background" || !backgroundCatalog.length) return;
     if (!selectedImportedSourceId && !selectedAssetId) {
       selectBackgroundSourceByKey(backgroundCatalog[0].key);
+      return;
     }
-  }, [activePanel, backgroundCatalog.length]);
+    if (selectedBackgroundKey && !visibleBackgroundCatalog.some((item) => item.key === selectedBackgroundKey)) {
+      if (visibleBackgroundCatalog[0]) selectBackgroundSourceByKey(visibleBackgroundCatalog[0].key);
+    }
+  }, [activePanel, backgroundCatalog.length, backgroundFilter, visibleBackgroundCatalog.length]);
 
   useEffect(() => {
     const column = sideColumnRef.current;
@@ -623,45 +736,20 @@ export function RegionManagementPage({
   }, []);
 
   useEffect(() => {
-    const stage = baseMapLibraryRef.current;
-    if (!stage || activePanel !== "background") return;
-    let wheelAccum = 0;
-    const onWheel = (event: WheelEvent) => {
-      if (!backgroundCatalog.length) return;
-      event.preventDefault();
+    const grid = baseMapLibraryRef.current;
+    if (!grid || activePanel !== "background") return;
+    const stopWheelBubble = (event: WheelEvent) => {
       event.stopPropagation();
-      wheelAccum += event.deltaY;
-      if (Math.abs(wheelAccum) < BACKGROUND_WHEEL_STEP_PX) return;
-      const direction = wheelAccum > 0 ? 1 : -1;
-      wheelAccum = 0;
-      stepBackgroundCatalog(direction);
     };
-    stage.addEventListener("wheel", onWheel, { passive: false });
-    return () => stage.removeEventListener("wheel", onWheel);
-  }, [activePanel, currentCatalogIndex, backgroundCatalog.length]);
-
-  useEffect(() => {
-    if (activePanel !== "background") return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      const target = event.target as HTMLElement | null;
-      if (target?.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target?.tagName ?? "")) return;
-      if (event.key === "ArrowLeft") {
-        event.preventDefault();
-        stepBackgroundCatalog(-1);
-      } else if (event.key === "ArrowRight") {
-        event.preventDefault();
-        stepBackgroundCatalog(1);
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [activePanel, currentCatalogIndex, backgroundCatalog.length]);
+    grid.addEventListener("wheel", stopWheelBubble, { passive: true });
+    return () => grid.removeEventListener("wheel", stopWheelBubble);
+  }, [activePanel, backgroundFilter]);
 
   useEffect(() => {
     if (activePanel !== "background" || currentCatalogIndex < 0) return;
-    const activeThumb = baseMapLibraryRef.current?.querySelector<HTMLElement>(".bg-film-thumb.active");
-    activeThumb?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
-  }, [activePanel, currentCatalogIndex]);
+    const activeCard = baseMapLibraryRef.current?.querySelector<HTMLElement>(".bg-material-card.active");
+    activeCard?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
+  }, [activePanel, currentCatalogIndex, backgroundFilter]);
 
   const removeBackgroundInstance = async (instanceId: string) => {
     if (!regionConfig || readOnly) return;
@@ -698,6 +786,20 @@ export function RegionManagementPage({
   };
 
   const updateRegionGeometry = (regionId: string, geometry: RegionGeometry) => {
+    // While editing a tag, keep geometry in draft only so Cancel/Close can restore.
+    if (regionEditBaselineRef.current?.id === regionId) {
+      setRegionDraft((draft) => {
+        if (!draft || draft.id !== regionId) return draft;
+        return {
+          ...draft,
+          geometry,
+          x: geometry.centerXCm / 100,
+          y: geometry.centerYCm / 100,
+        };
+      });
+      setDirty(true);
+      return;
+    }
     const current = configRef.current;
     if (!current) return;
     const next = cloneConfig(current.regionConfig);
@@ -707,7 +809,6 @@ export function RegionManagementPage({
     region.x = geometry.centerXCm / 100;
     region.y = geometry.centerYCm / 100;
     setCurrentConfig({ ...current, regionConfig: next });
-    setRegionDraft((draft) => draft?.id === regionId ? { ...draft, geometry, x: region.x, y: region.y } : draft);
     setDirty(true);
   };
 
@@ -746,14 +847,39 @@ export function RegionManagementPage({
     } else if (!readOnly && resizeTarget) {
       const region = regionConfig.regions.find((entry) => entry.id === resizeTarget.dataset.regionResize);
       if (region) {
-        selectRegion(region);
-        setDragState({ kind: "region-resize", pointerId: event.pointerId, regionId: region.id, handle: resizeTarget.dataset.handle ?? "se", geometry: structuredClone(region.geometry) });
+        const draft = regionDraftRef.current?.id === region.id ? regionDraftRef.current : null;
+        if (draft) {
+          setSelectedRegionId(region.id);
+          setActivePanel("edit");
+        } else {
+          selectRegion(region);
+        }
+        setDragState({
+          kind: "region-resize",
+          pointerId: event.pointerId,
+          regionId: region.id,
+          handle: resizeTarget.dataset.handle ?? "se",
+          geometry: structuredClone((draft ?? region).geometry),
+        });
       }
     } else if (!readOnly && regionTarget && activePanel !== "background" && activePanel !== "detection") {
       const region = regionConfig.regions.find((entry) => entry.id === regionTarget.dataset.regionId);
       if (region) {
-        selectRegion(region);
-        setDragState({ kind: "region", pointerId: event.pointerId, regionId: region.id, startWorldX: world.x, startWorldY: world.y, geometry: structuredClone(region.geometry) });
+        const draft = regionDraftRef.current?.id === region.id ? regionDraftRef.current : null;
+        if (draft) {
+          setSelectedRegionId(region.id);
+          setActivePanel("edit");
+        } else {
+          selectRegion(region);
+        }
+        setDragState({
+          kind: "region",
+          pointerId: event.pointerId,
+          regionId: region.id,
+          startWorldX: world.x,
+          startWorldY: world.y,
+          geometry: structuredClone((draft ?? region).geometry),
+        });
       }
     } else if (!readOnly && activePanel === "background" && backgroundResize) {
       const instance = regionConfig.backgroundInstances.find((entry) => entry.id === backgroundResize.dataset.bgResize);
@@ -894,7 +1020,15 @@ export function RegionManagementPage({
     touchPointsRef.current.delete(event.pointerId);
     if (touchPointsRef.current.size < 2) pinchRef.current = null;
     if (dragState && dragState.kind !== "pan" && configRef.current && !readOnly) {
-      void persistRegionConfig(configRef.current.regionConfig);
+      const editingRegionDrag =
+        (dragState.kind === "region" || dragState.kind === "region-resize")
+        && regionEditBaselineRef.current?.id === dragState.regionId;
+      const editingDetectionDrag =
+        dragState.kind === "detection-resize" && Boolean(detectionBaselineRef.current);
+      // Region/detection edits stay local until explicit Save/Apply.
+      if (!editingRegionDrag && !editingDetectionDrag) {
+        void persistRegionConfig(configRef.current.regionConfig);
+      }
     }
     setDragState(null);
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
@@ -1015,8 +1149,11 @@ export function RegionManagementPage({
     activePanel === "background" ? "is-bg-editing" : "",
     activePanel === "detection" ? "is-detection-editing" : "",
   ].filter(Boolean).join(" ");
+  const visibleDetectionMode = activePanel === "detection"
+    ? detection.mode
+    : (detection.appliedMode ?? detection.mode);
   const learnedDisplayPoints =
-    detection.appliedMode === "learned" || (activePanel === "detection" && detection.mode === "learned")
+    visibleDetectionMode === "learned"
       ? detection.learnedPointsCm
       : [];
   const xTickMin = Math.floor((0 - viewportOffset.x) / (cellSize * 2));
@@ -1133,7 +1270,7 @@ export function RegionManagementPage({
             </> : null}
             <image href={deviceIcon} x={viewportOffset.x - cellSize * 1.5} y={viewportOffset.y - cellSize * 1.5} width={cellSize * 3} height={cellSize * 3} className="region-axis-device" />
           </g>
-          {detection.appliedMode === "rect" || (activePanel === "detection" && detection.mode === "rect") ? (
+          {visibleDetectionMode === "rect" ? (
             <g className="region-detection-range-layer">
               <rect
                 className="range-detection-area workspace-detection-range"
@@ -1156,7 +1293,7 @@ export function RegionManagementPage({
               )) : null}
             </g>
           ) : null}
-          {(detection.appliedMode === "custom" || (activePanel === "detection" && detection.mode === "custom")) && detection.customPointsCm.length >= 2 ? (
+          {visibleDetectionMode === "custom" && detection.customPointsCm.length >= 2 ? (
             <g className="region-detection-range-layer">
               {detection.customPointsCm.length >= 3 ? (
                 <polygon className="range-custom-polygon workspace-detection-range custom" points={detection.customPointsCm.map((point) => `${tx(point.x)},${ty(point.y)}`).join(" ")} />
@@ -1170,7 +1307,7 @@ export function RegionManagementPage({
               ))}
             </g>
           ) : null}
-          {learnedDisplayPoints.length >= 3 ? (
+          {visibleDetectionMode === "learned" && learnedDisplayPoints.length >= 3 ? (
             <g className="region-detection-range-layer">
               <polygon className="range-learned-polygon workspace-detection-range learned" points={learnedDisplayPoints.map((point) => `${tx(point.x)},${ty(point.y)}`).join(" ")} />
               {learnedDisplayPoints.map((point, index) => (
@@ -1231,7 +1368,7 @@ export function RegionManagementPage({
           </> : null}
 
           {activePanel === "edit" && regionDraft ? <>
-            <div className="region-panel-head"><h3>区域配置</h3><button type="button" onClick={() => { setRegionDraft(null); setActivePanel("regions"); }}>关闭</button></div>
+            <div className="region-panel-head"><h3>区域配置</h3><button type="button" onClick={() => discardRegionEdits()}>关闭</button></div>
             <div className="region-form-grid">
               <label><span>区域名称</span><input disabled={readOnly} value={regionDraft.label} onChange={(event) => updateRegionDraft({ ...regionDraft, label: event.target.value })} /></label>
               <label><span>区域索引</span><input disabled={readOnly} type="number" min="0" max="31" value={regionDraft.index} onChange={(event) => {
@@ -1280,7 +1417,7 @@ export function RegionManagementPage({
                 <label><span>高度 (cm)</span><input disabled={readOnly} type="number" min="10" value={regionDraft.geometry.heightCm} onChange={(event) => updateRegionDraft({ ...regionDraft, geometry: { ...regionDraft.geometry, heightCm: Math.max(10, Number(event.target.value)) } as RegionGeometry })} /></label>
               </> : <label><span>半径 (cm)</span><input disabled={readOnly} type="number" min="10" value={regionDraft.geometry.radiusCm} onChange={(event) => updateRegionDraft({ ...regionDraft, geometry: { ...regionDraft.geometry, radiusCm: Math.max(10, Number(event.target.value)) } as RegionGeometry })} /></label>}
             </div>
-            <div className="region-panel-actions"><button type="button" className="primary-button" disabled={readOnly || saving} onClick={() => void saveRegionDraft()}>保存更改</button><button type="button" className="ghost-button" onClick={() => { setRegionDraft(null); setActivePanel("regions"); }}>取消</button></div>
+            <div className="region-panel-actions"><button type="button" className="primary-button" disabled={readOnly || saving} onClick={() => void saveRegionDraft()}>保存更改</button><button type="button" className="ghost-button" onClick={() => discardRegionEdits()}>取消</button></div>
           </> : null}
 
           {activePanel === "parameters" ? <>
@@ -1308,47 +1445,54 @@ export function RegionManagementPage({
           </> : null}
 
           {activePanel === "background" ? <>
-            <div className="region-panel-head"><div><h3>底图设置</h3><span>官方素材与用户素材</span></div><button type="button" disabled={readOnly} onClick={() => fileInputRef.current?.click()}>上传</button></div>
+            <div className="region-panel-head"><div><h3>底图设置</h3></div><button type="button" disabled={readOnly} onClick={() => fileInputRef.current?.click()}>上传</button></div>
             <section className="region-param-section background-library-section">
               <div className="region-param-section-title">
-                <h4>素材预览</h4>
-                <p>左右键 / 滚轮翻页；双击大图或点「添加」放入画布。</p>
+                <h4>素材库</h4>
+                <p>参考家具库方式：单击选中，双击添加；滚轮上下浏览。</p>
               </div>
-              {currentCatalogItem ? (
-                <div className="bg-carousel" ref={baseMapLibraryRef} tabIndex={0}>
-                  <div className="bg-carousel-stage">
-                    <button type="button" className="bg-carousel-nav" aria-label="上一张" onClick={() => stepBackgroundCatalog(-1)}>‹</button>
-                    <button
-                      type="button"
-                      className="bg-carousel-preview"
-                      title="双击添加到画布"
-                      disabled={readOnly || saving}
-                      onDoubleClick={() => void placeBackgroundItem(currentCatalogItem)}
-                    >
-                      <img src={currentCatalogItem.url} alt={currentCatalogItem.name} draggable={false} />
-                    </button>
-                    <button type="button" className="bg-carousel-nav" aria-label="下一张" onClick={() => stepBackgroundCatalog(1)}>›</button>
-                  </div>
-                  <div className="bg-carousel-meta">
-                    <strong>{currentCatalogIndex + 1} / {backgroundCatalog.length}</strong>
-                    <span>{currentCatalogItem.kind === "imported" ? "已导入" : "官方素材"} · 放置宽约 2m</span>
-                  </div>
-                  <div className="bg-carousel-filmstrip">
-                    {backgroundCatalog.map((item, index) => (
+              {backgroundCatalog.length ? (
+                <>
+                  <div className="bg-library-tabs" role="tablist" aria-label="素材分类">
+                    {backgroundFilterOptions.map((option) => (
                       <button
                         type="button"
-                        key={item.key}
-                        className={index === currentCatalogIndex ? "bg-film-thumb active" : "bg-film-thumb"}
-                        title={item.name}
-                        aria-label={item.name}
-                        onClick={() => selectBackgroundSourceByKey(item.key)}
-                        onDoubleClick={() => void placeBackgroundItem(item)}
+                        key={option.id}
+                        className={backgroundFilter === option.id ? "active" : undefined}
+                        aria-pressed={backgroundFilter === option.id}
+                        disabled={option.count === 0}
+                        onClick={() => setBackgroundFilter(option.id)}
                       >
-                        <img src={item.url} alt="" draggable={false} />
+                        {option.label}<span>{option.count}</span>
                       </button>
                     ))}
                   </div>
-                </div>
+                  <div className="bg-material-grid" ref={baseMapLibraryRef}>
+                    {visibleBackgroundCatalog.length ? visibleBackgroundCatalog.map((item) => {
+                      const selected = item.key === selectedBackgroundKey;
+                      return (
+                        <button
+                          type="button"
+                          key={item.key}
+                          className={selected ? "bg-material-card active" : "bg-material-card"}
+                          title={item.name}
+                          aria-pressed={selected}
+                          onClick={() => selectBackgroundSourceByKey(item.key)}
+                          onDoubleClick={() => void placeBackgroundItem(item)}
+                        >
+                          <span className="bg-material-thumb">
+                            <img src={item.url} alt="" draggable={false} />
+                          </span>
+                          <span className="bg-material-card-meta">
+                            <strong>{item.name.replace(/\.[^.]+$/, "")}</strong>
+                          </span>
+                        </button>
+                      );
+                    }) : (
+                      <p className="region-bg-empty">该分类暂无素材。</p>
+                    )}
+                  </div>
+                </>
               ) : (
                 <p className="region-bg-empty">暂无素材，请先上传或等待官方库加载。</p>
               )}
@@ -1372,7 +1516,11 @@ export function RegionManagementPage({
             <div className="detection-mode-tabs">{(["rect", "learned", "custom"] as const).map((mode) => <button type="button" key={mode} className={detection.mode === mode ? "active" : ""} disabled={readOnly && mode !== detection.mode} onClick={() => {
               const next = cloneConfig(regionConfig);
               next.detection.mode = mode;
-              if (mode === "custom") { next.detection.customConfirmed = false; next.detection.customPointsCm = []; }
+              if (mode === "custom") {
+                // Start a fresh custom draft; closing without apply restores last applied range.
+                next.detection.customConfirmed = false;
+                next.detection.customPointsCm = [];
+              }
               setCurrentConfig({ ...deviceConfig!, regionConfig: next });
               setDirty(true);
             }}>{mode === "rect" ? "四方探测范围" : mode === "learned" ? "学习探测范围" : "自定义范围"}</button>)}</div>
@@ -1383,7 +1531,19 @@ export function RegionManagementPage({
               setCurrentConfig({ ...deviceConfig!, regionConfig: next });
               setDirty(true);
             }} /></label>)}</div><button type="button" className="primary-button full-button" disabled={readOnly || saving} onClick={() => {
-              const next = cloneConfig(regionConfig); next.detection.appliedMode = "rect"; void persistRegionConfig(next, { fourSidedRange: true });
+              void (async () => {
+                const next = cloneConfig(regionConfig);
+                next.detection.mode = "rect";
+                next.detection.appliedMode = "rect";
+                next.rangeBox = {
+                  xMin: next.detection.rectCm.xMin / 100,
+                  xMax: next.detection.rectCm.xMax / 100,
+                  yMin: next.detection.rectCm.yMin / 100,
+                  yMax: next.detection.rectCm.yMax / 100,
+                };
+                const saved = await persistRegionConfig(next, { fourSidedRange: true });
+                if (saved) refreshDetectionBaseline();
+              })();
             }}>设置并同步设备</button></> : null}
             {detection.mode === "learned" ? <>
               <div className="region-range-switch-row">
@@ -1392,10 +1552,25 @@ export function RegionManagementPage({
               </div>
               <p className="region-help">已学习 {detection.learnedPointsCm.length} 个点。学习接口暂未完全接入时，可先导入 JSON 配置预览范围。</p>
               <button type="button" className="primary-button full-button" disabled={readOnly || saving || detection.learnedPointsCm.length < 3} onClick={() => {
-                const next = cloneConfig(regionConfig); next.detection.appliedMode = "learned"; void persistRegionConfig(next);
+                void (async () => {
+                  const next = cloneConfig(regionConfig);
+                  next.detection.mode = "learned";
+                  next.detection.appliedMode = "learned";
+                  const saved = await persistRegionConfig(next);
+                  if (saved) refreshDetectionBaseline();
+                })();
               }}>设置并本地应用</button>
             </> : null}
-            {detection.mode === "custom" ? <><div className="custom-range-status">{getDetectionHint(detection)}</div><div className="region-panel-actions"><button type="button" disabled={readOnly || detection.customPointsCm.length === 0} onClick={() => { const next = cloneConfig(regionConfig); next.detection.customPointsCm.pop(); setCurrentConfig({ ...deviceConfig!, regionConfig: next }); setDirty(true); }}>撤销</button><button type="button" disabled={readOnly || detection.customPointsCm.length === 0} onClick={() => { const next = cloneConfig(regionConfig); next.detection.customPointsCm = []; next.detection.customConfirmed = false; setCurrentConfig({ ...deviceConfig!, regionConfig: next }); setDirty(true); }}>清除</button><button type="button" className="primary-button" disabled={readOnly || !canConfirmCustomRange(detection.customPointsCm)} onClick={() => { const next = cloneConfig(regionConfig); next.detection.customConfirmed = true; next.detection.appliedMode = "custom"; void persistRegionConfig(next); }}>确认并本地应用</button></div><p className="local-only-note">确认后点击“设置并本地应用”保存到设备配置。</p></> : null}
+            {detection.mode === "custom" ? <><div className="custom-range-status">{getDetectionHint(detection)}</div><div className="region-panel-actions"><button type="button" disabled={readOnly || detection.customPointsCm.length === 0} onClick={() => { const next = cloneConfig(regionConfig); next.detection.customPointsCm.pop(); setCurrentConfig({ ...deviceConfig!, regionConfig: next }); setDirty(true); }}>撤销</button><button type="button" disabled={readOnly || detection.customPointsCm.length === 0} onClick={() => { const next = cloneConfig(regionConfig); next.detection.customPointsCm = []; next.detection.customConfirmed = false; setCurrentConfig({ ...deviceConfig!, regionConfig: next }); setDirty(true); }}>清除</button><button type="button" className="primary-button" disabled={readOnly || !canConfirmCustomRange(detection.customPointsCm)} onClick={() => {
+              void (async () => {
+                const next = cloneConfig(regionConfig);
+                next.detection.mode = "custom";
+                next.detection.customConfirmed = true;
+                next.detection.appliedMode = "custom";
+                const saved = await persistRegionConfig(next);
+                if (saved) refreshDetectionBaseline();
+              })();
+            }}>确认并本地应用</button></div><p className="local-only-note">确认后保存到当前生效探测范围；未应用前关闭面板将还原上一次范围。</p></> : null}
           </> : null}
         </aside> : null}
         </div>
