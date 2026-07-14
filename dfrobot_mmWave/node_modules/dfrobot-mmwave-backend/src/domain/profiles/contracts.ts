@@ -5,6 +5,7 @@ import type {
   C4004DeviceSettings,
   MmwaveDeviceDetail,
   MmwaveOverviewDeviceCard,
+  RangeBox,
   StoredRegionConfig,
   StoredZoneSnapshot,
   TrajectorySnapshot,
@@ -85,6 +86,7 @@ export interface MmwaveProfileAdapter {
   ): MmwaveDeviceDetail;
   readDeviceSettings?(device: StoredMmwaveDevice, statesById: Map<string, HaEntityState>): C4004DeviceSettings;
   writeDeviceSettings?(client: HaClient, device: StoredMmwaveDevice, settings: C4004DeviceSettings): Promise<void>;
+  applyFourSidedRange?(client: HaClient, device: StoredMmwaveDevice, rangeBox: RangeBox): Promise<void>;
   initializeDevice?(client: HaClient, device: StoredMmwaveDevice, payload: InitializeDeviceInput): Promise<void>;
   resetDevice?(client: HaClient, device: StoredMmwaveDevice): Promise<void>;
   getTrajectoryTopic?(device: StoredMmwaveDevice): string | null;

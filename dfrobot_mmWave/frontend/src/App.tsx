@@ -1,28 +1,29 @@
 ﻿import { useEffect, useMemo, useState } from "react";
+import { useRef } from "react";
 import {
-  createLiveWsUrl,
   discoverDevices,
   fetchDeviceDetail,
   fetchDevices,
   fetchMeta,
   fetchOverview,
   initializeDevice as submitInitializeDevice,
+  isLocalMockMode,
   refreshDevice,
   resetDevice,
   unbindDevice,
+  type DetectionMode,
   type MetaConfig,
   type MmwaveDeviceDetail,
   type MmwaveOverviewDeviceCard,
   type MmwaveOverviewMetrics,
-  type RangeBox,
-  type RegionOverlay,
   type StoredMmwaveDevice,
-  type TrajectoryPoint,
 } from "./api/client";
+import { RadarCanvas } from "./components/RadarCanvas";
+import { OverviewPage } from "./pages/OverviewPage";
+import { RegionManagementPage } from "./pages/RegionManagementPage";
 
 type View = "overview" | "detail" | "device-management" | "region-management";
 type DeviceNoMode = "auto" | "custom";
-type DetectionMode = "high_sensitivity" | "static_stable";
 
 type InitializeWizardState = {
   deviceId: string;
@@ -43,98 +44,19 @@ const navItems: Array<{ id: Exclude<View, "detail">; label: string; short: strin
   { id: "region-management", label: "区域管理", short: "RM" },
 ];
 
-const statsMeta = [
-  { key: "deviceCount", label: "总设备数", suffix: "台" },
-  { key: "peopleCount", label: "当前总人数", suffix: "人" },
-  { key: "targetCount", label: "当前运动总人数", suffix: "人" },
-  { key: "staticCount", label: "当前静止总人数", suffix: "人" },
-] as const;
-
 const detectionModeLabels: Record<DetectionMode, { title: string; description: string; frames: number; unmannedTime: number }> = {
-  high_sensitivity: {
+  1: {
     title: "高灵敏度模式",
     description: "快速响应，适合需要更快触发的场景。",
     frames: 2,
     unmannedTime: 5,
   },
-  static_stable: {
+  2: {
     title: "静态稳定模式",
     description: "持续存在，适合静止目标稳定检测。",
     frames: 7,
     unmannedTime: 30,
   },
-};
-
-const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
-
-const mapX = (box: RangeBox, value: number) => ((value - box.xMin) / (box.xMax - box.xMin)) * 100;
-const mapY = (box: RangeBox, value: number) => 100 - ((value - box.yMin) / (box.yMax - box.yMin)) * 100;
-
-const RadarCanvas = ({
-  coordinate,
-  rangeBox,
-  regions,
-  targets,
-  large = false,
-}: {
-  coordinate: RangeBox;
-  rangeBox: RangeBox;
-  regions: RegionOverlay[];
-  targets: TrajectoryPoint[];
-  large?: boolean;
-}) => {
-  const rangeX = clamp(mapX(coordinate, rangeBox.xMin), 0, 100);
-  const rangeY = clamp(mapY(coordinate, rangeBox.yMax), 0, 100);
-  const rangeWidth = clamp(mapX(coordinate, rangeBox.xMax), 0, 100) - rangeX;
-  const rangeHeight = clamp(mapY(coordinate, rangeBox.yMin), 0, 100) - rangeY;
-
-  return (
-    <svg className={large ? "radar-canvas radar-canvas-large" : "radar-canvas"} viewBox="0 0 100 100" preserveAspectRatio="none">
-      {Array.from({ length: 11 }, (_, index) => (
-        <line key={`vx-${index}`} className="grid-line" x1={index * 10} x2={index * 10} y1="0" y2="100" />
-      ))}
-      {Array.from({ length: 10 }, (_, index) => (
-        <line key={`hy-${index}`} className="grid-line" x1="0" x2="100" y1={index * 10} y2={index * 10} />
-      ))}
-      <rect className="range-box" x={rangeX} y={rangeY} width={Math.max(rangeWidth, 4)} height={Math.max(rangeHeight, 4)} />
-      {regions.map((region) => {
-        const x = clamp(mapX(coordinate, region.x), 4, 96);
-        const y = clamp(mapY(coordinate, region.y), 6, 94);
-        return (
-          <g className={region.active ? "region-tag region-tag-active" : "region-tag"} key={region.id}>
-            <rect x={x - 6} y={y - 4} width="12" height="6" rx="2" />
-            <text x={x} y={y}>
-              {region.label.replace("区域 ", "Z")}
-            </text>
-          </g>
-        );
-      })}
-
-      {targets.map((target) => {
-        const x = clamp(mapX(coordinate, target.x), 3, 97);
-        const y = clamp(mapY(coordinate, target.y), 3, 97);
-        return (
-          <g className={`target-point target-point-${target.feature}`} key={`${target.id}-${target.x}-${target.y}`}>
-            <circle cx={x} cy={y} r={large ? 1.7 : 1.3} />
-            <circle className="target-halo" cx={x} cy={y} r={large ? 3.2 : 2.4} />
-          </g>
-        );
-      })}
-
-      <g className="sensor-icon" transform="translate(50 88)">
-        <circle cx="0" cy="0" r={large ? 2.5 : 2.1} />
-        <path d="M -9 -1.5 A 9 9 0 0 1 9 -1.5" />
-        <path d="M -6 -3.5 A 6 6 0 0 1 6 -3.5" />
-        <path d="M -3 -5.3 A 3 3 0 0 1 3 -5.3" />
-      </g>
-      <text className="axis-label" x="2" y="98">
-        X:-5~5m
-      </text>
-      <text className="axis-label" x="78" y="6">
-        Y:0~9m
-      </text>
-    </svg>
-  );
 };
 
 function App() {
@@ -149,12 +71,15 @@ function App() {
     staticCount: 0,
   });
   const [overviewCards, setOverviewCards] = useState<MmwaveOverviewDeviceCard[]>([]);
+  const [overviewStale, setOverviewStale] = useState(false);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
   const [detail, setDetail] = useState<MmwaveDeviceDetail | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string>("");
   const [error, setError] = useState<string>("");
   const [initializeWizard, setInitializeWizard] = useState<InitializeWizardState | null>(null);
+  const overviewLoadingRef = useRef(false);
+  const detailLoadingRef = useRef(false);
 
   const selectedDevice = useMemo(
     () => devices.find((device) => device.id === selectedDeviceId) ?? null,
@@ -174,6 +99,7 @@ function App() {
     const response = await fetchOverview();
     setMetrics(response.metrics);
     setOverviewCards(response.devices);
+    setOverviewStale(false);
   };
 
   const loadDetail = async (deviceId: string) => {
@@ -202,29 +128,24 @@ function App() {
       return;
     }
 
-    const ws = new WebSocket(createLiveWsUrl());
-    ws.onopen = () => {
-      ws.send(JSON.stringify({ type: "subscribe", scope: "overview" }));
-    };
-    ws.onmessage = (event) => {
+    const refresh = async () => {
+      if (overviewLoadingRef.current || document.hidden) {
+        return;
+      }
+      overviewLoadingRef.current = true;
       try {
-        const payload = JSON.parse(event.data) as { type?: string; payload?: { metrics: MmwaveOverviewMetrics; devices: MmwaveOverviewDeviceCard[] } };
-        if (payload.type === "overview" && payload.payload) {
-          setMetrics(payload.payload.metrics);
-          setOverviewCards(payload.payload.devices);
-        }
+        await loadOverview();
       } catch {
-        // Ignore malformed message.
+        setOverviewStale(true);
+      } finally {
+        overviewLoadingRef.current = false;
       }
     };
-
-    const timer = window.setInterval(() => {
-      void loadOverview().catch(() => undefined);
-    }, 5000);
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 2000);
 
     return () => {
       window.clearInterval(timer);
-      ws.close();
     };
   }, [entered, view]);
 
@@ -233,28 +154,23 @@ function App() {
       return;
     }
 
-    const ws = new WebSocket(createLiveWsUrl());
-    ws.onopen = () => {
-      ws.send(JSON.stringify({ type: "subscribe", deviceId: selectedDeviceId }));
-    };
-    ws.onmessage = (event) => {
+    const refresh = async () => {
+      if (detailLoadingRef.current || document.hidden) {
+        return;
+      }
+      detailLoadingRef.current = true;
       try {
-        const payload = JSON.parse(event.data) as { type?: string; payload?: MmwaveDeviceDetail };
-        if (payload.type === "detail" && payload.payload) {
-          setDetail(payload.payload);
-        }
+        await loadDetail(selectedDeviceId);
       } catch {
-        // Ignore malformed message.
+        // Keep the last successful detail while the device is temporarily unavailable.
+      } finally {
+        detailLoadingRef.current = false;
       }
     };
-
-    const timer = window.setInterval(() => {
-      void loadDetail(selectedDeviceId).catch(() => undefined);
-    }, 5000);
+    const timer = window.setInterval(() => void refresh(), 2000);
 
     return () => {
       window.clearInterval(timer);
-      ws.close();
     };
   }, [entered, view, selectedDeviceId]);
 
@@ -367,7 +283,7 @@ function App() {
       deviceNoMode: "auto",
       customDeviceNo: "",
       installHeightM: device.installInfo?.installHeightM ?? 1.8,
-      detectionMode: device.detectionMode ?? "high_sensitivity",
+      detectionMode: device.detectionMode ?? 1,
       step: 1,
       submitting: false,
       completed: false,
@@ -528,81 +444,15 @@ function App() {
           </button>
         ))}
       </nav>
-      <div className="sidebar-foot">
-        <span>HA: {meta?.linked ? "Linked" : "Unlinked"}</span>
-        <span>MQTT: {meta?.mqttConnected ? "Live" : meta?.mqttConfigured ? "Configured" : "Disabled"}</span>
+      <div className="sidebar-bottom">
+        <div className="sidebar-foot">
+          <span>HA: {meta?.linked ? "Linked" : "Unlinked"}</span>
+          <span>MQTT: {meta?.mqttConnected ? "Live" : meta?.mqttConfigured ? "Configured" : "Disabled"}</span>
+        </div>
+        {message ? <div className="notice notice-info sidebar-notice">{message}</div> : null}
+        {error ? <div className="notice notice-error sidebar-notice">{error}</div> : null}
       </div>
     </aside>
-  );
-
-  const renderOverview = () => (
-    <section className="page">
-      <header className="page-header">
-        <div>
-          <p className="eyebrow">Overview</p>
-          <h2>设备总览</h2>
-        </div>
-        <div className="page-actions">
-          <button type="button" className="ghost-button" onClick={() => void bootstrap()} disabled={busy}>
-            刷新总览
-          </button>
-          <button type="button" className="primary-button" onClick={() => setView("device-management")}>
-            添加设备
-          </button>
-        </div>
-      </header>
-
-      <div className="stats-grid">
-        {statsMeta.map((stat) => (
-          <article key={stat.key} className="stat-card">
-            <span>{stat.label}</span>
-            <strong>
-              {metrics[stat.key]}
-              <small>{stat.suffix}</small>
-            </strong>
-          </article>
-        ))}
-      </div>
-
-      <section className="panel">
-        <div className="panel-header">
-          <div>
-            <h3>实时监控矩阵</h3>
-          </div>
-        </div>
-
-        {overviewCards.length ? (
-          <div className="device-grid">
-            {overviewCards.map((card) => (
-              <button key={card.id} type="button" className="device-card" onClick={() => handleOpenDevice(card.id)}>
-                <div className="device-card-head">
-                  <div>
-                    <strong>{card.name}</strong>
-                  </div>
-                  <small>{card.status}</small>
-                </div>
-                <RadarCanvas
-                  coordinate={card.coordinate}
-                  rangeBox={card.rangeBox}
-                  regions={card.regions}
-                  targets={card.targets}
-                />
-                <div className="device-card-foot">
-                  <span>总人数 {card.peopleCount}</span>
-                  <span>运动 {card.targetCount}</span>
-                  <span>静止 {card.staticCount}</span>
-                </div>
-              </button>
-            ))}
-          </div>
-        ) : (
-          <div className="empty-state">
-            <strong>当前还没有设备数据</strong>
-            <span>先去设备管理页扫描 C4004 设备，扫描后这里会自动出现设备矩阵。</span>
-          </div>
-        )}
-      </section>
-    </section>
   );
 
   const renderDetail = () => (
@@ -636,6 +486,7 @@ function App() {
             <RadarCanvas
               coordinate={detail.coordinate}
               rangeBox={detail.rangeBox}
+              detection={detail.detection}
               regions={detail.regions}
               targets={detail.targets}
               large
@@ -788,27 +639,6 @@ function App() {
     </section>
   );
 
-  const renderRegionManagement = () => (
-    <section className="page">
-      <header className="page-header">
-        <div>
-          <p className="eyebrow">Region Management</p>
-          <h2>区域管理</h2>
-        </div>
-      </header>
-      <section className="panel">
-        <div className="placeholder-copy">
-          <strong>区域管理页本期先保留为正式占位页。</strong>
-          <span>
-            {selectedDevice
-              ? `当前上下文设备：${selectedDevice.name}。后续这里将扩展真实区域编辑和标签配置。`
-              : "从设备详情页点击“区域配置”进入时，这里会保留当前设备上下文。"}
-          </span>
-        </div>
-      </section>
-    </section>
-  );
-
   if (!entered) {
     return renderWelcome();
   }
@@ -817,12 +647,33 @@ function App() {
     <div className="app-shell">
       {renderSidebar()}
       <main className="content-shell">
-        {message ? <div className="notice notice-info">{message}</div> : null}
-        {error ? <div className="notice notice-error">{error}</div> : null}
-        {view === "overview" ? renderOverview() : null}
+        {isLocalMockMode() ? (
+          <div className="notice notice-info mock-mode-banner">
+            本地 Mock 模式：数据来自内存假接口，轨迹与区域状态每 2 秒自动刷新。厨房=四方范围，客厅=学习范围，书房=离线只读。
+          </div>
+        ) : null}
+        {view === "overview" ? (
+          <OverviewPage
+            metrics={metrics}
+            devices={overviewCards}
+            busy={busy}
+            stale={overviewStale}
+            onRefresh={() => void bootstrap()}
+            onAddDevice={() => setView("device-management")}
+            onOpenDevice={handleOpenDevice}
+          />
+        ) : null}
         {view === "detail" ? renderDetail() : null}
         {view === "device-management" ? renderDeviceManagement() : null}
-        {view === "region-management" ? renderRegionManagement() : null}
+        {view === "region-management" ? (
+          <RegionManagementPage
+            devices={devices}
+            selectedDeviceId={selectedDevice?.id ?? selectedDeviceId}
+            onSelectDevice={setSelectedDeviceId}
+            onMessage={setMessage}
+            onError={setError}
+          />
+        ) : null}
       </main>
       {initializeWizard ? (
         <div className="modal-backdrop" role="presentation" onClick={closeInitializeWizard}>
@@ -918,7 +769,7 @@ function App() {
             {initializeWizard.step === 3 ? (
               <div className="modal-body">
                 <div className="mode-options">
-                  {(Object.keys(detectionModeLabels) as DetectionMode[]).map((mode) => {
+                  {([1, 2] as const).map((mode) => {
                     const modeMeta = detectionModeLabels[mode];
                     return (
                       <button

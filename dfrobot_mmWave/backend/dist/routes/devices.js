@@ -45,6 +45,9 @@ const toConfigStatus = (message) => {
     if (message === "Device profile does not support config yet") {
         return 400;
     }
+    if (message.startsWith("Invalid region config") || message === "No valid config update provided") {
+        return 400;
+    }
     return 502;
 };
 const parseOptionalBoolean = (value) => {
@@ -157,13 +160,26 @@ const createMmwaveRouter = (service) => {
     });
     router.put("/devices/:deviceId/config", async (req, res) => {
         try {
-            const rawSettings = req.body?.deviceSettings ?? req.body?.settings ?? req.body;
+            const hasStructuredBody = isRecord(req.body) && ("deviceSettings" in req.body || "settings" in req.body || "regionConfig" in req.body || "apply" in req.body);
+            const rawSettings = hasStructuredBody ? req.body.deviceSettings ?? req.body.settings : req.body;
             const settings = parseDeviceSettings(rawSettings);
-            if (!settings) {
-                res.status(400).json({ ok: false, error: "No valid device settings provided" });
+            const regionConfig = hasStructuredBody ? req.body.regionConfig : undefined;
+            if (!settings && regionConfig === undefined) {
+                res.status(400).json({ ok: false, error: "No valid config update provided" });
                 return;
             }
-            res.json({ ok: true, config: await service.updateDeviceConfig(req.params.deviceId, settings) });
+            const apply = isRecord(req.body?.apply)
+                ? {
+                    fourSidedRange: req.body.apply.fourSidedRange === true,
+                    regionMcuIo: req.body.apply.regionMcuIo === true,
+                }
+                : undefined;
+            const result = await service.updateDeviceConfig(req.params.deviceId, {
+                deviceSettings: settings ?? undefined,
+                regionConfig,
+                apply,
+            });
+            res.json({ ok: true, ...result });
         }
         catch (error) {
             const message = error instanceof Error ? error.message : "Failed to update device config";

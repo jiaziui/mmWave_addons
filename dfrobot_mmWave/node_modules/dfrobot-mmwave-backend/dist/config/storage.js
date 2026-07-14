@@ -3,7 +3,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.DeviceStorage = void 0;
+exports.DeviceStorage = exports.normalizeRegionConfig = exports.createDefaultRegionConfig = void 0;
 const node_fs_1 = __importDefault(require("node:fs"));
 const node_path_1 = __importDefault(require("node:path"));
 const profiles_1 = require("../types/profiles");
@@ -11,15 +11,17 @@ const BINDING_REGISTRY_FILE = "devices.json";
 const DEVICE_META_FILE = "config.json";
 const LEGACY_DEVICE_DATA_FILE = "data.json";
 const BINDING_REGISTRY_VERSION = 1;
-const DEFAULT_COORDINATE = { xMin: -5, xMax: 5, yMin: 0, yMax: 9 };
-const DEFAULT_REGION_POSITIONS = [
-    { x: -3.6, y: 6.8 },
-    { x: -1.4, y: 6.2 },
-    { x: 1.1, y: 6.5 },
-    { x: -2.5, y: 3.4 },
-    { x: 2.6, y: 3.6 },
-    { x: 0, y: 1.8 },
-];
+const DEFAULT_COORDINATE = { xMin: -5, xMax: 5, yMin: -1, yMax: 9 };
+const DEFAULT_RANGE_BOX = { xMin: -5, xMax: 5, yMin: 0, yMax: 9 };
+const MAX_REGIONS = 32;
+const VALID_REGION_TYPES = new Set([
+    "status_detection",
+    "noise",
+    "approach_depart",
+    "boundary",
+    "empty_tag",
+]);
+const VALID_IO_INDEXES = new Set([0, 2, 3, 4, 5, 6]);
 const sanitizeIdPart = (value) => value
     .trim()
     .toLowerCase()
@@ -146,22 +148,41 @@ const normalizeRangeBox = (value, fallback) => {
         yMax: toFiniteNumber(value.yMax, fallback.yMax),
     };
 };
-const createDefaultRegions = () => DEFAULT_REGION_POSITIONS.map((position, index) => ({
-    id: `zone-${index + 1}`,
-    label: `Zone ${index + 1}`,
-    x: position.x,
-    y: position.y,
-    enabled: true,
-}));
-const createDefaultRegionConfig = () => ({
-    coordinate: cloneRangeBox(DEFAULT_COORDINATE),
-    rangeBox: cloneRangeBox(DEFAULT_COORDINATE),
-    regions: createDefaultRegions(),
+const createDefaultDetection = () => ({
+    mode: "rect",
+    appliedMode: "rect",
+    rectCm: {
+        xMin: DEFAULT_RANGE_BOX.xMin * 100,
+        xMax: DEFAULT_RANGE_BOX.xMax * 100,
+        yMin: DEFAULT_RANGE_BOX.yMin * 100,
+        yMax: DEFAULT_RANGE_BOX.yMax * 100,
+    },
+    learnedPointsCm: [],
+    customPointsCm: [],
+    customConfirmed: false,
 });
+const createDefaultSyncState = () => ({
+    fourSidedRange: "local_only",
+    regionMcuIo: "local_only",
+});
+const createDefaultRegionConfig = () => ({
+    version: 2,
+    coordinate: cloneRangeBox(DEFAULT_COORDINATE),
+    rangeBox: cloneRangeBox(DEFAULT_RANGE_BOX),
+    regions: [],
+    detection: createDefaultDetection(),
+    backgroundInstances: [],
+    syncState: createDefaultSyncState(),
+});
+exports.createDefaultRegionConfig = createDefaultRegionConfig;
 const createEmptyZoneSnapshot = (updatedAt) => ({
     updatedAt,
     presenceStates: Array.from({ length: 6 }, (_, index) => ({
         id: `zone-${index + 1}`,
+        active: false,
+    })),
+    zones: Array.from({ length: 6 }, (_, index) => ({
+        index,
         active: false,
     })),
     counts: {
@@ -178,37 +199,176 @@ const createDefaultDiscovery = (timestamp) => ({
     discoveredAt: timestamp,
     lastUpdated: timestamp,
 });
-const normalizeRegionConfig = (value) => {
-    const fallback = createDefaultRegionConfig();
+const normalizePointList = (value) => {
+    if (!Array.isArray(value)) {
+        return [];
+    }
+    return value
+        .filter(isRecord)
+        .map((point) => ({
+        x: Math.round(toFiniteNumber(point.x, 0)),
+        y: Math.round(toFiniteNumber(point.y, 0)),
+    }))
+        .slice(0, 150);
+};
+const normalizeDetection = (value) => {
+    const fallback = createDefaultDetection();
     if (!isRecord(value)) {
         return fallback;
     }
-    const rawRegions = Array.isArray(value.regions) ? value.regions : [];
-    const regionById = new Map();
-    for (const entry of rawRegions) {
-        if (!isRecord(entry) || typeof entry.id !== "string") {
-            continue;
-        }
-        regionById.set(entry.id, entry);
+    const mode = value.mode === "learned" || value.mode === "custom" ? value.mode : "rect";
+    const appliedMode = value.appliedMode === "rect" || value.appliedMode === "learned" || value.appliedMode === "custom"
+        ? value.appliedMode
+        : undefined;
+    const rect = isRecord(value.rectCm) ? value.rectCm : {};
+    const rectCm = {
+        xMin: Math.round(toFiniteNumber(rect.xMin, fallback.rectCm.xMin)),
+        xMax: Math.round(toFiniteNumber(rect.xMax, fallback.rectCm.xMax)),
+        yMin: Math.round(toFiniteNumber(rect.yMin, fallback.rectCm.yMin)),
+        yMax: Math.round(toFiniteNumber(rect.yMax, fallback.rectCm.yMax)),
+    };
+    if (rectCm.xMin >= rectCm.xMax || rectCm.yMin >= rectCm.yMax) {
+        throw new Error("Invalid region config: detection rectangle bounds are invalid");
     }
     return {
-        coordinate: normalizeRangeBox(value.coordinate, fallback.coordinate),
-        rangeBox: normalizeRangeBox(value.rangeBox, fallback.rangeBox),
-        regions: fallback.regions.map((region) => {
-            const current = regionById.get(region.id);
-            if (!current) {
-                return region;
-            }
-            return {
-                id: region.id,
-                label: typeof current.label === "string" && current.label.trim() ? current.label : region.label,
-                x: toFiniteNumber(current.x, region.x),
-                y: toFiniteNumber(current.y, region.y),
-                enabled: typeof current.enabled === "boolean" ? current.enabled : region.enabled,
-            };
-        }),
+        mode,
+        appliedMode,
+        rectCm,
+        learnedPointsCm: normalizePointList(value.learnedPointsCm),
+        customPointsCm: normalizePointList(value.customPointsCm),
+        customConfirmed: Boolean(value.customConfirmed),
     };
 };
+const normalizeGeometry = (value) => {
+    if (!isRecord(value)) {
+        throw new Error("Invalid region config: region geometry is required");
+    }
+    const centerXCm = Math.round(toFiniteNumber(value.centerXCm, 0));
+    const centerYCm = Math.round(toFiniteNumber(value.centerYCm, 0));
+    if (value.shape === "circle") {
+        const radiusCm = Math.round(toFiniteNumber(value.radiusCm, 0));
+        if (radiusCm <= 0) {
+            throw new Error("Invalid region config: circle radius must be positive");
+        }
+        return { shape: "circle", centerXCm, centerYCm, radiusCm };
+    }
+    const widthCm = Math.round(toFiniteNumber(value.widthCm, 0));
+    const heightCm = Math.round(toFiniteNumber(value.heightCm, 0));
+    if (widthCm <= 0 || heightCm <= 0) {
+        throw new Error("Invalid region config: rectangle size must be positive");
+    }
+    return { shape: "rect", centerXCm, centerYCm, widthCm, heightCm };
+};
+const normalizeRegion = (value) => {
+    if (!isRecord(value)) {
+        throw new Error("Invalid region config: region must be an object");
+    }
+    const id = typeof value.id === "string" && value.id.trim() ? value.id.trim() : "";
+    const index = Math.round(toFiniteNumber(value.index, -1));
+    if (!id || index < 0 || index >= MAX_REGIONS) {
+        throw new Error("Invalid region config: region id or index is invalid");
+    }
+    const regionType = VALID_REGION_TYPES.has(value.regionType)
+        ? value.regionType
+        : "empty_tag";
+    const geometry = normalizeGeometry(value.geometry);
+    const rawIoIndex = Math.round(toFiniteNumber(value.ioIndex, 0));
+    const ioIndex = regionType === "status_detection" && VALID_IO_INDEXES.has(rawIoIndex)
+        ? rawIoIndex
+        : 0;
+    const rawMcuIo = Math.round(toFiniteNumber(value.mcuIo, -1));
+    if (regionType === "status_detection" && index < 6 && (rawMcuIo < -1 || rawMcuIo > 255)) {
+        throw new Error("Invalid region config: MCU IO must be between -1 and 255");
+    }
+    const mcuIo = regionType === "status_detection" && index < 6
+        ? rawMcuIo
+        : -1;
+    return {
+        id,
+        index,
+        label: typeof value.label === "string" && value.label.trim() ? value.label.trim() : `区域 ${index + 1}`,
+        regionType,
+        geometry,
+        ioIndex,
+        mcuIo,
+        x: geometry.centerXCm / 100,
+        y: geometry.centerYCm / 100,
+        enabled: typeof value.enabled === "boolean" ? value.enabled : true,
+        visible: typeof value.visible === "boolean" ? value.visible : true,
+    };
+};
+const normalizeBackgroundInstance = (value) => {
+    if (!isRecord(value)) {
+        return null;
+    }
+    const id = typeof value.id === "string" && value.id.trim() ? value.id.trim() : "";
+    const sourceId = typeof value.sourceId === "string" && value.sourceId.trim() ? value.sourceId.trim() : "";
+    const widthCm = Math.round(toFiniteNumber(value.widthCm, 0));
+    const heightCm = Math.round(toFiniteNumber(value.heightCm, 0));
+    if (!id || !sourceId || widthCm <= 0 || heightCm <= 0) {
+        return null;
+    }
+    return {
+        id,
+        sourceType: value.sourceType === "user" ? "user" : "system",
+        sourceId,
+        xCm: Math.round(toFiniteNumber(value.xCm, 0)),
+        yCm: Math.round(toFiniteNumber(value.yCm, 0)),
+        widthCm,
+        heightCm,
+        visible: typeof value.visible === "boolean" ? value.visible : true,
+        zIndex: Math.round(toFiniteNumber(value.zIndex, 0)),
+    };
+};
+const normalizeSyncState = (value) => {
+    const record = isRecord(value) ? value : {};
+    const normalizeStatus = (status) => status === "synced" || status === "pending" ? status : "local_only";
+    return {
+        fourSidedRange: normalizeStatus(record.fourSidedRange),
+        regionMcuIo: normalizeStatus(record.regionMcuIo),
+        updatedAt: typeof record.updatedAt === "string" && record.updatedAt.trim() ? record.updatedAt : undefined,
+    };
+};
+const normalizeRegionConfig = (value) => {
+    const fallback = (0, exports.createDefaultRegionConfig)();
+    if (!isRecord(value) || value.version !== 2) {
+        return fallback;
+    }
+    const rawRegions = Array.isArray(value.regions) ? value.regions : [];
+    if (rawRegions.length > MAX_REGIONS) {
+        throw new Error(`Invalid region config: at most ${MAX_REGIONS} regions are allowed`);
+    }
+    const regions = rawRegions.map(normalizeRegion);
+    const indexes = new Set();
+    for (const region of regions) {
+        if (indexes.has(region.index)) {
+            throw new Error("Invalid region config: region indexes must be unique");
+        }
+        indexes.add(region.index);
+    }
+    const detection = normalizeDetection(value.detection);
+    const coordinate = normalizeRangeBox(value.coordinate, fallback.coordinate);
+    if (coordinate.xMin >= coordinate.xMax || coordinate.yMin >= coordinate.yMax) {
+        throw new Error("Invalid region config: coordinate bounds are invalid");
+    }
+    return {
+        version: 2,
+        coordinate,
+        rangeBox: {
+            xMin: detection.rectCm.xMin / 100,
+            xMax: detection.rectCm.xMax / 100,
+            yMin: detection.rectCm.yMin / 100,
+            yMax: detection.rectCm.yMax / 100,
+        },
+        regions,
+        detection,
+        backgroundInstances: (Array.isArray(value.backgroundInstances) ? value.backgroundInstances : [])
+            .map(normalizeBackgroundInstance)
+            .filter((instance) => Boolean(instance)),
+        syncState: normalizeSyncState(value.syncState),
+    };
+};
+exports.normalizeRegionConfig = normalizeRegionConfig;
 const normalizeBinding = (value) => {
     if (!isRecord(value)) {
         return null;
@@ -280,7 +440,7 @@ const normalizeMetaFile = (raw, fallbackId) => {
             ? normalizeDetectionMode(raw.detectionMode)
             : undefined,
         deviceSettings: normalizeDeviceSettings(raw.deviceSettings),
-        regionConfig: normalizeRegionConfig(raw.regionConfig),
+        regionConfig: (0, exports.normalizeRegionConfig)(raw.regionConfig),
     };
 };
 const applyBindingToDevice = (device, binding) => {
@@ -349,7 +509,7 @@ const createDeviceFromBinding = (binding) => {
             entityCount: 1,
         },
         discovery: createDefaultDiscovery(now),
-        regionConfig: createDefaultRegionConfig(),
+        regionConfig: (0, exports.createDefaultRegionConfig)(),
         lastZoneSnapshot: createEmptyZoneSnapshot(now),
     };
 };
@@ -451,7 +611,7 @@ class DeviceStorage {
                     discoveredAt: existing?.discovery.discoveredAt ?? now,
                     lastUpdated: now,
                 },
-                regionConfig: existing?.regionConfig ?? createDefaultRegionConfig(),
+                regionConfig: existing?.regionConfig ?? (0, exports.createDefaultRegionConfig)(),
                 lastZoneSnapshot: existing?.lastZoneSnapshot ?? createEmptyZoneSnapshot(now),
             };
             nextDevices.push(applyBindingToDevice(nextDevice, binding));
@@ -568,6 +728,22 @@ class DeviceStorage {
                 ...current.deviceSettings,
                 ...normalizedSettings,
             },
+            discovery: {
+                ...current.discovery,
+                lastUpdated: new Date().toISOString(),
+            },
+        };
+        this.saveDevice(nextDevice);
+        return nextDevice;
+    }
+    updateRegionConfig(id, regionConfig) {
+        const current = this.getDevice(id);
+        if (!current) {
+            throw new Error("Device not found");
+        }
+        const nextDevice = {
+            ...current,
+            regionConfig: (0, exports.normalizeRegionConfig)(regionConfig),
             discovery: {
                 ...current.discovery,
                 lastUpdated: new Date().toISOString(),
@@ -700,7 +876,10 @@ class DeviceStorage {
         const deviceDir = this.getDeviceDir(device.id);
         node_fs_1.default.mkdirSync(deviceDir, { recursive: true });
         const { meta } = splitStoredDevice(device);
-        node_fs_1.default.writeFileSync(this.getDeviceMetaPath(device.id), JSON.stringify(meta, null, 2), "utf8");
+        const metaPath = this.getDeviceMetaPath(device.id);
+        const tempPath = `${metaPath}.tmp`;
+        node_fs_1.default.writeFileSync(tempPath, `${JSON.stringify(meta, null, 2)}\n`, "utf8");
+        node_fs_1.default.renameSync(tempPath, metaPath);
         node_fs_1.default.rmSync(this.getLegacyDeviceDataPath(device.id), { force: true });
     }
 }

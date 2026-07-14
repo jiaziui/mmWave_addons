@@ -1,0 +1,31 @@
+
+> dfrobot-mmwave-addons@0.1.0 dev
+> concurrently -k -n backend,frontend -c cyan,magenta "npm run dev -w backend" "npm run dev -w frontend"
+
+[frontend] 
+[frontend] > dfrobot-mmwave-frontend@0.1.0 dev
+[frontend] > vite
+[frontend] 
+[backend] 
+[backend] > dfrobot-mmwave-backend@0.1.0 dev
+[backend] > ts-node-dev --respawn --transpile-only src/index.ts
+[backend] 
+[backend] [INFO] 17:01:32 ts-node-dev ver. 2.0.0 (using ts-node ver. 10.9.2, typescript ver. 5.9.3)
+[frontend] Port 5173 is in use, trying another one...
+[frontend] 
+[frontend]   [32m[1mVITE[22m v6.4.3[39m  [2mready in [0m[1m499[22m[2m[0m ms[22m
+[frontend] 
+[frontend]   [32m➜[39m  [1mLocal[22m:   [36mhttp://localhost:[1m5174[22m/[39m
+[frontend] [2m  [32m➜[39m  [1mNetwork[22m[2m: use [22m[1m--host[22m[2m to expose[22m
+[backend] Error: listen EADDRINUSE: address already in use :::42069
+[backend]     at Server.setupListenHandle [as _listen2] (node:net:1940:16)
+[backend]     at listenInCluster (node:net:1997:12)
+[backend]     at Server.listen (node:net:2102:7)
+[backend]     at start (D:\User\lj\DFRobot\Project\module\C4004\C4004\05_Software\home_assistant\mmWave_addons\dfrobot_mmWave\backend\src\index.ts:100:14)
+[backend]     at Object.<anonymous> (D:\User\lj\DFRobot\Project\module\C4004\C4004\05_Software\home_assistant\mmWave_addons\dfrobot_mmWave\backend\src\index.ts:114:1)
+[backend]     at Module.<anonymous> (node:internal/modules/cjs/loader:1804:14)
+[backend]     at Module._compile (D:\User\lj\DFRobot\Project\module\C4004\C4004\05_Software\home_assistant\mmWave_addons\dfrobot_mmWave\node_modules\source-map-support\source-map-support.js:568:25)
+[backend]     at Module.m._compile (C:\Users\32731\AppData\Local\Temp\ts-node-dev-hook-2988989074093892.js:69:33)
+[backend]     at node:internal/modules/cjs/loader:1936:10
+[backend]     at require.extensions..jsx.require.extensions..js (C:\Users\32731\AppData\Local\Temp\ts-node-dev-hook-2988989074093892.js:114:20)
+[backend] [ERROR] 17:01:33 Error: listen EADDRINUSE: address already in use :::42069

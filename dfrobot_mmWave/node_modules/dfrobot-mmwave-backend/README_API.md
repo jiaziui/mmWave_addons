@@ -36,6 +36,14 @@ interface RegionOverlay {
   active: boolean;
   x: number;
   y: number;
+  regionType?: RegionType;
+  geometry?:
+    | { shape: "rect"; centerX: number; centerY: number; width: number; height: number }
+    | { shape: "circle"; centerX: number; centerY: number; radius: number };
+  movingCount?: number;
+  staticCount?: number;
+  boundaryState?: string;
+  approachAwayState?: string;
 }
 ```
 
@@ -100,21 +108,19 @@ interface StoredMmwaveDevice {
     lastUpdated: string;
   };
 
-  regionConfig: {
-    coordinate: RangeBox;
-    rangeBox: RangeBox;
-    regions: Array<{
-      id: string;
-      label: string;
-      x: number;
-      y: number;
-      enabled: boolean;
-    }>;
-  };
+  regionConfig: RegionConfigV2;
 
   lastZoneSnapshot: {
     updatedAt: string;
     presenceStates: Array<{ id: string; active: boolean }>;
+    zones: Array<{
+      index: number;
+      active: boolean;
+      movingCount?: number;
+      staticCount?: number;
+      boundaryState?: string;
+      approachAwayState?: string;
+    }>;
     counts: {
       peopleCount: number;
       targetCount: number;
@@ -181,6 +187,72 @@ interface C4004DeviceSettings {
 | `2` | static_stable | `check_to_active_frames = 7`, `unmanned_time = 30` |
 
 当前路由兼容旧字符串 `"high_sensitivity"` / `"static_stable"`，但前端新代码建议只传 `1` 或 `2`。
+
+### 2.7 RegionConfig V2
+
+区域、探测范围和当前设备的底图实例持久化到 `<deviceId>/config.json`。所有几何字段显式使用厘米，只有兼容总览的 `x/y` 使用米。
+
+```ts
+type RegionType =
+  | "status_detection"
+  | "noise"
+  | "approach_depart"
+  | "boundary"
+  | "empty_tag";
+
+interface RegionConfigV2 {
+  version: 2;
+  coordinate: RangeBox;
+  rangeBox: RangeBox;
+  regions: RegionDefinition[];
+  detection: {
+    mode: "rect" | "learned" | "custom";
+    appliedMode?: "rect" | "learned" | "custom";
+    rectCm: { xMin: number; xMax: number; yMin: number; yMax: number };
+    learnedPointsCm: Array<{ x: number; y: number }>;
+    customPointsCm: Array<{ x: number; y: number }>;
+    customConfirmed: boolean;
+  };
+  backgroundInstances: BaseMapInstance[];
+  syncState: {
+    fourSidedRange: "synced" | "pending" | "local_only";
+    regionMcuIo: "synced" | "pending" | "local_only";
+    updatedAt?: string;
+  };
+}
+
+interface RegionDefinition {
+  id: string;
+  index: number; // 0...31，设备内唯一
+  label: string;
+  regionType: RegionType;
+  geometry:
+    | { shape: "rect"; centerXCm: number; centerYCm: number; widthCm: number; heightCm: number }
+    | { shape: "circle"; centerXCm: number; centerYCm: number; radiusCm: number };
+  ioIndex: 0 | 2 | 3 | 4 | 5 | 6;
+  mcuIo: number; // -1...255；仅 status_detection 且 index < 6 可同步设备
+  x: number;
+  y: number;
+  enabled: boolean;
+  visible: boolean;
+}
+
+interface BaseMapInstance {
+  id: string;
+  sourceType: "system" | "user";
+  sourceId: string;
+  xCm: number;
+  yCm: number;
+  widthCm: number;
+  heightCm: number;
+  visible: boolean;
+  zIndex: number;
+}
+```
+
+- 最多保存 32 个区域，`index` 必须唯一。
+- 无 `version: 2` 的旧区域结构不会迁移区域内容，而是生成空 V2 配置。
+- 学习范围 UI 保留但设备接口尚未接入；自定义范围仅本地保存。
 
 ## 3. Meta 接口
 
@@ -285,9 +357,20 @@ GET /api/mmwave/devices/discover
         "lastUpdated": "2026-07-10T06:52:33.602Z"
       },
       "regionConfig": {
+        "version": 2,
         "coordinate": { "xMin": -5, "xMax": 5, "yMin": 0, "yMax": 9 },
         "rangeBox": { "xMin": -5, "xMax": 5, "yMin": 0, "yMax": 9 },
-        "regions": []
+        "regions": [],
+        "detection": {
+          "mode": "rect",
+          "appliedMode": "rect",
+          "rectCm": { "xMin": -500, "xMax": 500, "yMin": 0, "yMax": 900 },
+          "learnedPointsCm": [],
+          "customPointsCm": [],
+          "customConfirmed": false
+        },
+        "backgroundInstances": [],
+        "syncState": { "fourSidedRange": "local_only", "regionMcuIo": "local_only" }
       },
       "lastZoneSnapshot": {
         "updatedAt": "2026-07-10T06:52:33.602Z",
@@ -388,6 +471,7 @@ interface MmwaveOverviewResponse {
     trajectoryAvailable: boolean;
     mqttConnected: boolean;
     rangeBox: RangeBox;
+    detection: RegionConfigV2["detection"];
     coordinate: RangeBox;
     regions: RegionOverlay[];
     targets: TrajectoryPoint[];
@@ -420,6 +504,14 @@ interface MmwaveOverviewResponse {
       "trajectoryAvailable": true,
       "mqttConnected": true,
       "rangeBox": { "xMin": -5, "xMax": 5, "yMin": 0, "yMax": 9 },
+      "detection": {
+        "mode": "rect",
+        "appliedMode": "rect",
+        "rectCm": { "xMin": -500, "xMax": 500, "yMin": 0, "yMax": 900 },
+        "learnedPointsCm": [],
+        "customPointsCm": [],
+        "customConfirmed": false
+      },
       "coordinate": { "xMin": -5, "xMax": 5, "yMin": 0, "yMax": 9 },
       "regions": [
         { "id": "zone-1", "label": "Zone 1", "active": false, "x": -3.6, "y": 6.8 }
@@ -458,11 +550,16 @@ interface DeviceDetailResponse {
     model: string;
     deviceId: string;
     online: boolean;
+    status: string;
+    signal: number;
+    peopleCount: number;
+    targetCount: number;
     firmwareVersion?: string;
     trajectoryAvailable: boolean;
     mqttConnected: boolean;
     lastUpdated: string;
     rangeBox: RangeBox;
+    detection: RegionConfigV2["detection"];
     coordinate: RangeBox;
     regions: RegionOverlay[];
     targets: TrajectoryPoint[];
@@ -519,7 +616,7 @@ GET /api/mmwave/devices/:deviceId/config
 
 - 如果 Home Assistant 已连接，会优先读取当前 HA 实体值。
 - 读取成功后会把 `deviceSettings` 写入 `<deviceId>/config.json`。
-- 如果 Home Assistant 未连接，则返回本地 `config.json` 中已有配置。
+- 如果 Home Assistant 未连接或状态刷新失败，则返回本地 `config.json` 中已有配置，保证离线设备仍可只读查看区域配置。
 
 成功响应：
 
@@ -541,9 +638,20 @@ GET /api/mmwave/devices/:deviceId/config
     },
     "detectionMode": 1,
     "regionConfig": {
+      "version": 2,
       "coordinate": { "xMin": -5, "xMax": 5, "yMin": 0, "yMax": 9 },
       "rangeBox": { "xMin": -5, "xMax": 5, "yMin": 0, "yMax": 9 },
-      "regions": []
+      "regions": [],
+      "detection": {
+        "mode": "rect",
+        "appliedMode": "rect",
+        "rectCm": { "xMin": -500, "xMax": 500, "yMin": 0, "yMax": 900 },
+        "learnedPointsCm": [],
+        "customPointsCm": [],
+        "customConfirmed": false
+      },
+      "backgroundInstances": [],
+      "syncState": { "fourSidedRange": "local_only", "regionMcuIo": "local_only" }
     },
     "deviceSettings": {
       "presenceEnable": true,
@@ -572,7 +680,7 @@ GET /api/mmwave/devices/:deviceId/config
 | 状态码 | 说明 |
 | --- | --- |
 | `404` | 设备不存在 |
-| `502` | HA 查询失败或其他后端错误 |
+| `502` | 其他后端错误 |
 
 ### 5.6 更新设备配置
 
@@ -580,32 +688,34 @@ GET /api/mmwave/devices/:deviceId/config
 PUT /api/mmwave/devices/:deviceId/config
 ```
 
-请求体：
+请求体支持 `deviceSettings`、`regionConfig` 和 `apply` 三个可选字段，至少需要提供一项配置：
 
 ```json
 {
-  "deviceSettings": {
-    "presenceEnable": true,
-    "trajectoryTrackEnable": true,
-    "trajectoryLed": false,
-    "motionLed": false,
-    "installZAngle": 0,
-    "realTimePeopleTime": 5,
-    "trackMeters": 3,
-    "trackExistsTime": 30,
-    "checkToActiveFrames": 2,
-    "unmannedTime": 5,
-    "zone1McuIo": 2,
-    "zone2McuIo": 3,
-    "zone3McuIo": 4,
-    "zone4McuIo": 5,
-    "zone5McuIo": 6,
-    "zone6McuIo": 0
+  "regionConfig": {
+    "version": 2,
+    "coordinate": { "xMin": -5, "xMax": 5, "yMin": -1, "yMax": 9 },
+    "rangeBox": { "xMin": -3, "xMax": 3, "yMin": 0, "yMax": 7 },
+    "regions": [],
+    "detection": {
+      "mode": "rect",
+      "appliedMode": "rect",
+      "rectCm": { "xMin": -300, "xMax": 300, "yMin": 0, "yMax": 700 },
+      "learnedPointsCm": [],
+      "customPointsCm": [],
+      "customConfirmed": false
+    },
+    "backgroundInstances": [],
+    "syncState": { "fourSidedRange": "local_only", "regionMcuIo": "local_only" }
+  },
+  "apply": {
+    "fourSidedRange": true,
+    "regionMcuIo": false
   }
 }
 ```
 
-也支持局部更新：
+设备参数也支持局部更新：
 
 ```json
 {
@@ -618,9 +728,12 @@ PUT /api/mmwave/devices/:deviceId/config
 
 行为：
 
-- 后端先写 Home Assistant 实体。
-- HA 写入成功后，再保存到 `<deviceId>/config.json`。
-- 如果某个字段未传，则不修改该字段。
+- `deviceSettings` 使用严格策略：先写 HA，全部成功后才保存 `config.json`。
+- `regionConfig` 先原子写入本地，再按 `apply` 尝试同步设备。
+- `apply.fourSidedRange = true` 时，依次写四个 `range_*` number 实体，再按 `set_four_sided_range_mode` 按钮。
+- `apply.regionMcuIo = true` 时，区域索引 `0...5` 映射到 `zone_1...zone_6_mcu_io`；更大索引不写设备。
+- 区域设备同步失败不会回滚本地配置，响应 warning 且 `syncState` 保持 `pending`，前端可让用户手动重试。
+- 不传 `apply` 时，区域、自定义范围和底图实例只保存本地。
 
 成功响应：
 
@@ -629,13 +742,17 @@ PUT /api/mmwave/devices/:deviceId/config
   "ok": true,
   "config": {
     "id": "c4004-xxx-c4004_0",
-    "deviceSettings": {
-      "trajectoryLed": true,
-      "motionLed": true
-    }
+    "regionConfig": {}
+  },
+  "applyResult": {
+    "fourSidedRange": "applied",
+    "regionMcuIo": "skipped",
+    "warnings": []
   }
 }
 ```
+
+`applyResult.fourSidedRange` 和 `applyResult.regionMcuIo` 的值为 `applied | failed | skipped`。
 
 失败状态码：
 
@@ -643,7 +760,7 @@ PUT /api/mmwave/devices/:deviceId/config
 | --- | --- |
 | `400` | 请求体没有有效配置字段，或 profile 不支持配置 |
 | `404` | 设备不存在 |
-| `424` | Home Assistant 未连接 |
+| `424` | `deviceSettings` 写入时 Home Assistant 未连接 |
 | `502` | HA 写入失败或其他后端错误 |
 
 ### 5.7 刷新设备
@@ -814,9 +931,55 @@ interface InitializeDeviceRequest {
 | `424` | Home Assistant 未连接 |
 | `502` | HA 写入失败或其他初始化失败 |
 
-## 6. 前端推荐调用流程
+## 6. 用户底图接口
 
-### 6.1 页面启动
+用户底图保存在 `<dataDir>/base_maps/user`。官方 system 素材由前端静态打包，不使用这些接口。
+
+### 6.1 获取用户底图库
+
+```http
+GET /api/mmwave/base-maps/user
+```
+
+```json
+{
+  "ok": true,
+  "assets": [{
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "originalName": "room.png",
+    "fileName": "550e8400-e29b-41d4-a716-446655440000.png",
+    "mimeType": "image/png",
+    "size": 123456,
+    "createdAt": "2026-07-13T08:00:00.000Z"
+  }]
+}
+```
+
+### 6.2 读取用户底图内容
+
+```http
+GET /api/mmwave/base-maps/user/:assetId
+```
+
+- 成功时直接返回图片二进制，并设置正确的 `Content-Type`。
+- 素材不存在或 `assetId` 非法时返回 `404`。
+
+### 6.3 上传或覆盖用户底图
+
+```http
+PUT /api/mmwave/base-maps/user/:assetId
+Content-Type: multipart/form-data
+```
+
+- 表单文件字段固定为 `file`，`assetId` 建议由前端 `crypto.randomUUID()` 生成。
+- 仅接受 PNG、JPEG、WebP，单文件最大 10MB。
+- 后端同时核对 MIME、扩展名和文件头；SVG、伪造类型和路径穿越均拒绝。
+- 上传成功只加入全局图库，不会自动创建任何设备的 `backgroundInstances`。
+- 当前不提供全局素材删除接口；从画布移除只更新设备自己的 `regionConfig`。
+
+## 7. 前端推荐调用流程
+
+### 7.1 页面启动
 
 ```text
 GET /api/meta/config
@@ -824,7 +987,7 @@ GET /api/mmwave/devices
 GET /api/mmwave/overview
 ```
 
-### 6.2 添加或绑定设备
+### 7.2 添加或绑定设备
 
 ```text
 GET /api/mmwave/devices/discover
@@ -832,35 +995,50 @@ POST /api/mmwave/devices/:deviceId/actions/initialize
 GET /api/mmwave/overview
 ```
 
-### 6.3 设备详情页
+### 7.3 设备详情页
 
 ```text
 GET /api/mmwave/devices/:deviceId/detail
 GET /api/mmwave/devices/:deviceId/config
 ```
 
-### 6.4 用户点击刷新
+### 7.4 用户点击刷新
 
 ```text
 POST /api/mmwave/devices/:deviceId/actions/refresh
 ```
 
-### 6.5 用户解绑
+### 7.5 用户解绑
 
 ```text
 POST /api/mmwave/devices/:deviceId/actions/unbind
 GET /api/mmwave/devices
 ```
 
-## 7. 当前数据来源说明
+### 7.6 总览和详情实时刷新
 
-### 7.1 本地文件
+```text
+页面可见时：每 2 秒 GET /api/mmwave/overview
+详情可见时：每 2 秒 GET /api/mmwave/devices/:deviceId/detail
+页面隐藏或离开后：停止轮询
+```
+
+- 前端必须避免请求重叠；上一轮未完成时跳过下一轮。
+- 请求失败保留最后一次成功数据并显示过期提示，不清空页面。
+- MQTT 无轨迹时 `targets = []`，HA 人数和区域状态仍正常展示。
+- 当前前端不使用 WebSocket。
+
+## 8. 当前数据来源说明
+
+### 8.1 本地文件
 
 后端当前使用：
 
 ```text
 /homeassistant/dfrobot_mmwave/devices.json
 /homeassistant/dfrobot_mmwave/<deviceId>/config.json
+/homeassistant/dfrobot_mmwave/base_maps/user/assets.json
+/homeassistant/dfrobot_mmwave/base_maps/user/<assetId>.<ext>
 ```
 
 `devices.json` 保存绑定索引和稳定路由字段：
@@ -899,23 +1077,13 @@ interface StoredDeviceConfig {
   };
   detectionMode?: 1 | 2;
   deviceSettings?: C4004DeviceSettings;
-  regionConfig: {
-    coordinate: RangeBox;
-    rangeBox: RangeBox;
-    regions: Array<{
-      id: string;
-      label: string;
-      x: number;
-      y: number;
-      enabled: boolean;
-    }>;
-  };
+  regionConfig: RegionConfigV2;
 }
 ```
 
 当前不再使用 `<deviceId>/data.json` 存运行态。
 
-### 7.2 内存缓存
+### 8.2 内存缓存
 
 这些数据来自 HA 或 MQTT，后端重启后需要重新刷新：
 
@@ -926,11 +1094,11 @@ interface StoredDeviceConfig {
 - 轨迹点 targets
 - MQTT 轨迹 hex
 
-## 8. 当前限制
+## 9. 当前限制
 
 - 当前只实现 C4004 后端能力。
 - C4001/C4002/C4003 当前没有启用 profile 配置。
-- 区域配置修改接口尚未开放。
+- 学习探测范围尚未接入设备；自定义探测范围当前仅本地保存。
+- 探测范围配置和标签区域配置的导入/导出入口当前只显示“功能开发中”。
 - MQTT `multi_tag_config`、`learned_trajectory_range`、`config_file_range` 的 command/result 闭环尚未实现。
 - MQTT `multi_tag_config`、`learned_trajectory_range`、`config_file_range` 还没有落盘到 config。
-- 详情接口里的 `basics[].label` 当前来自后端代码，部分构建环境可能显示为乱码；前端建议优先使用 `key` 做展示映射。

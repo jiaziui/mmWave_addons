@@ -1,8 +1,17 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.MmwaveService = void 0;
+const storage_1 = require("../config/storage");
 const registry_1 = require("./profiles/registry");
 const runtimeCache_1 = require("./runtimeCache");
+const ZONE_MCU_SETTING_KEYS = [
+    "zone1McuIo",
+    "zone2McuIo",
+    "zone3McuIo",
+    "zone4McuIo",
+    "zone5McuIo",
+    "zone6McuIo",
+];
 const cloneRangeBox = (rangeBox) => ({ ...rangeBox });
 const buildGenericRegions = (device) => {
     const presenceById = new Map(device.lastZoneSnapshot.presenceStates.map((state) => [state.id, state.active]));
@@ -30,6 +39,7 @@ const buildGenericDeviceCard = (device, mqttBridge, trajectory) => ({
     mqttConnected: mqttBridge.isConnected(),
     coordinate: cloneRangeBox(device.regionConfig.coordinate),
     rangeBox: cloneRangeBox(device.regionConfig.rangeBox),
+    detection: device.regionConfig.detection,
     regions: buildGenericRegions(device),
     targets: trajectory?.points ?? [],
 });
@@ -41,12 +51,17 @@ const buildGenericDeviceDetail = (device, mqttBridge, trajectory) => {
         model: device.model,
         deviceId: device.haDeviceId ?? device.prefix,
         online: device.discovery.status === "online",
+        status: device.discovery.status === "online" ? "Online" : "Offline",
+        signal: device.discovery.signal,
+        peopleCount: device.lastZoneSnapshot.counts.peopleCount,
+        targetCount: device.lastZoneSnapshot.counts.targetCount,
         firmwareVersion: device.firmwareVersion,
         trajectoryAvailable: Boolean(trajectory),
         mqttConnected: mqttBridge.isConnected(),
         lastUpdated: device.discovery.lastUpdated,
         coordinate: cloneRangeBox(device.regionConfig.coordinate),
         rangeBox: cloneRangeBox(device.regionConfig.rangeBox),
+        detection: device.regionConfig.detection,
         regions: buildGenericRegions(device),
         targets: trajectory?.points ?? [],
         movingCount: device.lastZoneSnapshot.counts.movingCount,
@@ -276,27 +291,121 @@ class MmwaveService {
         if (!this.haClient || !profile?.readDeviceSettings) {
             return buildDeviceConfig(device);
         }
-        const states = await this.haClient.getAllStates();
-        const statesById = new Map(states.map((state) => [state.entity_id, state]));
-        const syncedSettings = profile.readDeviceSettings(device, statesById);
-        const syncedDevice = this.storage.updateDeviceSettings(deviceId, syncedSettings);
-        return buildDeviceConfig(syncedDevice);
+        try {
+            const states = await this.haClient.getAllStates();
+            const statesById = new Map(states.map((state) => [state.entity_id, state]));
+            this.syncDeviceState(device, statesById);
+            const syncedSettings = profile.readDeviceSettings(device, statesById);
+            const syncedDevice = this.storage.updateDeviceSettings(deviceId, syncedSettings);
+            return buildDeviceConfig(this.runtimeCache.hydrateDevice(syncedDevice));
+        }
+        catch (error) {
+            this.logger.warn({ deviceId, error }, "Returning local device config because HA refresh failed");
+            return buildDeviceConfig(device);
+        }
     }
-    async updateDeviceConfig(deviceId, settings) {
-        const device = this.storage.getDevice(deviceId);
+    async updateDeviceConfig(deviceId, input) {
+        let device = this.storage.getDevice(deviceId);
         if (!device) {
             throw new Error("Device not found");
         }
-        if (!this.haClient) {
-            throw new Error("Home Assistant is not linked");
-        }
         const profile = (0, registry_1.getMmwaveProfile)(device.profileId);
-        if (!profile?.writeDeviceSettings) {
-            throw new Error("Device profile does not support config yet");
+        if (input.deviceSettings) {
+            if (!this.haClient) {
+                throw new Error("Home Assistant is not linked");
+            }
+            if (!profile?.writeDeviceSettings) {
+                throw new Error("Device profile does not support config yet");
+            }
+            await profile.writeDeviceSettings(this.haClient, device, input.deviceSettings);
+            device = this.storage.updateDeviceSettings(deviceId, input.deviceSettings);
         }
-        await profile.writeDeviceSettings(this.haClient, device, settings);
-        const updatedDevice = this.storage.updateDeviceSettings(deviceId, settings);
-        return buildDeviceConfig(updatedDevice);
+        const applyResult = {
+            fourSidedRange: "skipped",
+            regionMcuIo: "skipped",
+            warnings: [],
+        };
+        if (input.regionConfig !== undefined) {
+            const normalized = (0, storage_1.normalizeRegionConfig)(input.regionConfig);
+            const pendingConfig = {
+                ...normalized,
+                syncState: {
+                    ...normalized.syncState,
+                    fourSidedRange: input.apply?.fourSidedRange ? "pending" : normalized.syncState.fourSidedRange,
+                    regionMcuIo: input.apply?.regionMcuIo ? "pending" : normalized.syncState.regionMcuIo,
+                    updatedAt: new Date().toISOString(),
+                },
+            };
+            device = this.storage.updateRegionConfig(deviceId, pendingConfig);
+            if (input.apply?.fourSidedRange) {
+                if (!this.haClient || !profile?.applyFourSidedRange) {
+                    applyResult.fourSidedRange = "failed";
+                    applyResult.warnings.push("四方探测范围已保存到本地，但设备同步不可用");
+                }
+                else {
+                    try {
+                        await profile.applyFourSidedRange(this.haClient, device, device.regionConfig.rangeBox);
+                        applyResult.fourSidedRange = "applied";
+                    }
+                    catch (error) {
+                        applyResult.fourSidedRange = "failed";
+                        applyResult.warnings.push(`四方探测范围已保存到本地，但设备同步失败：${error instanceof Error ? error.message : String(error)}`);
+                    }
+                }
+            }
+            if (input.apply?.regionMcuIo) {
+                const mcuSettings = {};
+                for (const region of device.regionConfig.regions) {
+                    if (region.regionType !== "status_detection" || region.index < 0 || region.index >= 6) {
+                        continue;
+                    }
+                    mcuSettings[ZONE_MCU_SETTING_KEYS[region.index]] = region.mcuIo;
+                }
+                if (!Object.keys(mcuSettings).length) {
+                    applyResult.regionMcuIo = "skipped";
+                }
+                else if (!this.haClient || !profile?.writeDeviceSettings) {
+                    applyResult.regionMcuIo = "failed";
+                    applyResult.warnings.push("区域 MCU IO 已保存到本地，但设备同步不可用");
+                }
+                else {
+                    try {
+                        await profile.writeDeviceSettings(this.haClient, device, mcuSettings);
+                        device = this.storage.updateDeviceSettings(deviceId, mcuSettings);
+                        applyResult.regionMcuIo = "applied";
+                    }
+                    catch (error) {
+                        applyResult.regionMcuIo = "failed";
+                        applyResult.warnings.push(`区域 MCU IO 已保存到本地，但设备同步失败：${error instanceof Error ? error.message : String(error)}`);
+                    }
+                }
+            }
+            const nextSyncState = {
+                ...device.regionConfig.syncState,
+                fourSidedRange: applyResult.fourSidedRange === "applied"
+                    ? "synced"
+                    : applyResult.fourSidedRange === "failed"
+                        ? "pending"
+                        : device.regionConfig.syncState.fourSidedRange,
+                regionMcuIo: applyResult.regionMcuIo === "applied"
+                    ? "synced"
+                    : applyResult.regionMcuIo === "failed"
+                        ? "pending"
+                        : device.regionConfig.syncState.regionMcuIo,
+                updatedAt: new Date().toISOString(),
+            };
+            device = this.storage.updateRegionConfig(deviceId, {
+                ...device.regionConfig,
+                syncState: nextSyncState,
+            });
+        }
+        if (!input.deviceSettings && input.regionConfig === undefined) {
+            throw new Error("No valid config update provided");
+        }
+        return {
+            config: buildDeviceConfig(device),
+            applyResult,
+        };
     }
     async initializeDevice(deviceId, payload) {
         const current = this.storage.validateInitializeDevice(deviceId, payload);

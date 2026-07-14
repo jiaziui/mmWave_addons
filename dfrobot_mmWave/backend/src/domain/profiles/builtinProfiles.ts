@@ -13,15 +13,6 @@ import { findWritableEntityId, toEntityId, writeC4004Entity } from "./profileRun
 
 const DEFAULT_COORDINATE: RangeBox = { xMin: -5, xMax: 5, yMin: 0, yMax: 9 };
 
-const REGION_POSITIONS = [
-  { x: -3.6, y: 6.8 },
-  { x: -1.4, y: 6.2 },
-  { x: 1.1, y: 6.5 },
-  { x: -2.5, y: 3.4 },
-  { x: 2.6, y: 3.6 },
-  { x: 0, y: 1.8 },
-];
-
 const DETECTION_MODE_PARAMS = {
   1: {
     checkToActiveFrames: 2,
@@ -85,18 +76,7 @@ const objectIdFromEntityId = (entityId: string): string => entityId.split(".", 2
 const cloneRangeBox = (rangeBox: RangeBox): RangeBox => ({ ...rangeBox });
 
 const resolveStoredRegions = (storedConfig?: StoredRegionConfig): StoredRegionConfig["regions"] =>
-  Array.from({ length: 6 }, (_, index) => {
-    const id = `zone-${index + 1}`;
-    const storedRegion = storedConfig?.regions.find((region) => region.id === id);
-
-    return {
-      id,
-      label: storedRegion?.label ?? `Zone ${index + 1}`,
-      x: storedRegion?.x ?? REGION_POSITIONS[index]?.x ?? 0,
-      y: storedRegion?.y ?? REGION_POSITIONS[index]?.y ?? 0,
-      enabled: storedRegion?.enabled ?? true,
-    };
-  });
+  storedConfig?.regions ?? [];
 
 const buildRangeBox = (statesById: Map<string, HaEntityState>, prefix: string): RangeBox => {
   const xMin = readNumber(statesById, toEntityId(prefix, { key: "rangeXMin", domain: "number", slug: "range_x_min", access: "readwrite" }));
@@ -133,13 +113,32 @@ const buildRegions = (
   prefix: string,
   storedConfig?: StoredRegionConfig,
 ): RegionOverlay[] =>
-  resolveStoredRegions(storedConfig).map((region, index) => {
+  resolveStoredRegions(storedConfig).filter((region) => region.enabled && region.visible).map((region) => {
+    const zoneNumber = region.index + 1;
     const entityId = toEntityId(prefix, {
-      key: `zone${index + 1}Presence`,
+      key: `zone${zoneNumber}Presence`,
       domain: "binary_sensor",
-      slug: `zone_${index + 1}_presence`,
+      slug: `zone_${zoneNumber}_presence`,
       access: "read",
     });
+    const movingCount = readNumber(statesById, `sensor.${prefix}_zone_${zoneNumber}_moving_count`);
+    const staticCount = readNumber(statesById, `sensor.${prefix}_zone_${zoneNumber}_static_count`);
+    const boundaryState = readString(statesById, `text_sensor.${prefix}_zone_${zoneNumber}_boundary_state`);
+    const approachAwayState = readString(statesById, `text_sensor.${prefix}_zone_${zoneNumber}_approach_away_state`);
+    const geometry = region.geometry.shape === "circle"
+      ? {
+          shape: "circle" as const,
+          centerX: region.geometry.centerXCm / 100,
+          centerY: region.geometry.centerYCm / 100,
+          radius: region.geometry.radiusCm / 100,
+        }
+      : {
+          shape: "rect" as const,
+          centerX: region.geometry.centerXCm / 100,
+          centerY: region.geometry.centerYCm / 100,
+          width: region.geometry.widthCm / 100,
+          height: region.geometry.heightCm / 100,
+        };
 
     return {
       id: region.id,
@@ -147,31 +146,50 @@ const buildRegions = (
       active: isTruthyState(readString(statesById, entityId)),
       x: region.x,
       y: region.y,
+      regionType: region.regionType,
+      geometry,
+      movingCount: movingCount ?? undefined,
+      staticCount: staticCount ?? undefined,
+      boundaryState: boundaryState && !isUnavailable(boundaryState) ? boundaryState : undefined,
+      approachAwayState: approachAwayState && !isUnavailable(approachAwayState) ? approachAwayState : undefined,
     };
   });
 
-const buildZoneSnapshot = (statesById: Map<string, HaEntityState>, prefix: string): StoredZoneSnapshot => ({
-  updatedAt: new Date().toISOString(),
-  presenceStates: Array.from({ length: 6 }, (_, index) => {
+const buildZoneSnapshot = (statesById: Map<string, HaEntityState>, prefix: string): StoredZoneSnapshot => {
+  const zones = Array.from({ length: 6 }, (_, index) => {
+    const zoneNumber = index + 1;
     const entityId = toEntityId(prefix, {
-      key: `zone${index + 1}Presence`,
+      key: `zone${zoneNumber}Presence`,
       domain: "binary_sensor",
-      slug: `zone_${index + 1}_presence`,
+      slug: `zone_${zoneNumber}_presence`,
       access: "read",
     });
+    const movingCount = readNumber(statesById, `sensor.${prefix}_zone_${zoneNumber}_moving_count`);
+    const staticCount = readNumber(statesById, `sensor.${prefix}_zone_${zoneNumber}_static_count`);
+    const boundaryState = readString(statesById, `text_sensor.${prefix}_zone_${zoneNumber}_boundary_state`);
+    const approachAwayState = readString(statesById, `text_sensor.${prefix}_zone_${zoneNumber}_approach_away_state`);
 
     return {
-      id: `zone-${index + 1}`,
+      index,
       active: isTruthyState(readString(statesById, entityId)),
+      movingCount: movingCount ?? undefined,
+      staticCount: staticCount ?? undefined,
+      boundaryState: boundaryState && !isUnavailable(boundaryState) ? boundaryState : undefined,
+      approachAwayState: approachAwayState && !isUnavailable(approachAwayState) ? approachAwayState : undefined,
     };
-  }),
-  counts: {
-    peopleCount: readNumber(statesById, `sensor.${prefix}_people_count`) ?? 0,
-    targetCount: readNumber(statesById, `sensor.${prefix}_target_count`) ?? 0,
-    movingCount: sumZoneCounts(statesById, prefix, "moving"),
-    staticCount: sumZoneCounts(statesById, prefix, "static"),
-  },
-});
+  });
+  return {
+    updatedAt: new Date().toISOString(),
+    presenceStates: zones.map((zone) => ({ id: `zone-${zone.index + 1}`, active: zone.active })),
+    zones,
+    counts: {
+      peopleCount: readNumber(statesById, `sensor.${prefix}_people_count`) ?? 0,
+      targetCount: readNumber(statesById, `sensor.${prefix}_target_count`) ?? 0,
+      movingCount: sumZoneCounts(statesById, prefix, "moving"),
+      staticCount: sumZoneCounts(statesById, prefix, "static"),
+    },
+  };
+};
 
 const C4004_DEVICE_SETTING_KEYS = [
   "presenceEnable",
@@ -286,6 +304,7 @@ export const c4004ProfileAdapter: MmwaveProfileAdapter = {
   },
   buildRuntimeState: (device, statesById) => ({
     regionConfig: {
+      ...device.regionConfig,
       coordinate: cloneRangeBox(device.regionConfig.coordinate),
       rangeBox: buildRangeBox(statesById, device.prefix),
       regions: resolveStoredRegions(device.regionConfig),
@@ -313,12 +332,16 @@ export const c4004ProfileAdapter: MmwaveProfileAdapter = {
       mqttConnected: runtime.mqttConnected,
       coordinate: cloneRangeBox(device.regionConfig.coordinate),
       rangeBox: cloneRangeBox(device.regionConfig.rangeBox),
+      detection: device.regionConfig.detection,
       regions: buildRegions(statesById, device.prefix, device.regionConfig),
       targets: runtime.trajectory?.points ?? [],
     };
   },
   buildDeviceDetail: (device, statesById, runtime) => {
     const online = isTruthyState(readString(statesById, `binary_sensor.${device.prefix}_online`));
+    const status = readString(statesById, `text_sensor.${device.prefix}_status`) ?? (online ? "Online" : "Offline");
+    const peopleCount = readNumber(statesById, `sensor.${device.prefix}_people_count`) ?? 0;
+    const targetCount = readNumber(statesById, `sensor.${device.prefix}_target_count`) ?? 0;
     const movingCount = sumZoneCounts(statesById, device.prefix, "moving");
     const staticCount = sumZoneCounts(statesById, device.prefix, "static");
 
@@ -328,12 +351,17 @@ export const c4004ProfileAdapter: MmwaveProfileAdapter = {
       model: device.model,
       deviceId: device.haDeviceId ?? device.prefix,
       online,
+      status,
+      signal: device.discovery.signal,
+      peopleCount,
+      targetCount,
       firmwareVersion: device.firmwareVersion,
       trajectoryAvailable: Boolean(runtime.trajectory),
       mqttConnected: runtime.mqttConnected,
       lastUpdated: new Date().toISOString(),
       coordinate: cloneRangeBox(device.regionConfig.coordinate),
       rangeBox: cloneRangeBox(device.regionConfig.rangeBox),
+      detection: device.regionConfig.detection,
       regions: buildRegions(statesById, device.prefix, device.regionConfig),
       targets: runtime.trajectory?.points ?? [],
       movingCount,
@@ -398,6 +426,13 @@ export const c4004ProfileAdapter: MmwaveProfileAdapter = {
   readDeviceSettings: (device, statesById) => buildDeviceSettings(statesById, device.prefix),
   writeDeviceSettings: async (client, device, settings) => {
     await writeDeviceSettings(client, device.prefix, settings);
+  },
+  applyFourSidedRange: async (client, device, rangeBox) => {
+    await writeC4004Entity(client, device.prefix, "rangeXMin", Math.round(rangeBox.xMin * 100));
+    await writeC4004Entity(client, device.prefix, "rangeXMax", Math.round(rangeBox.xMax * 100));
+    await writeC4004Entity(client, device.prefix, "rangeYMin", Math.round(rangeBox.yMin * 100));
+    await writeC4004Entity(client, device.prefix, "rangeYMax", Math.round(rangeBox.yMax * 100));
+    await writeC4004Entity(client, device.prefix, "setFourSidedRangeMode");
   },
   initializeDevice: async (client, device, payload) => {
     const modeParams = DETECTION_MODE_PARAMS[payload.detectionMode];

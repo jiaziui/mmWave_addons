@@ -1,0 +1,38 @@
+<svg width="788" height="1173" viewBox="0 0 788 1173" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="orange" x1="12" y1="0" x2="776" y2="768" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FF6A00"/>
+      <stop offset="1" stop-color="#FF4B00"/>
+    </linearGradient>
+  </defs>
+
+  <!--
+    这个版本没有单独移动三角形，而是调整了整张 SVG 的画布坐标。
+    这样三角形的中心点会落在整张 SVG 的几何中心，
+    放进网页后，如果按 SVG 自身中心去定位，就会以三角形为中心。
+  -->
+  <g transform="translate(-372 -159)">
+    <g transform="translate(0 1024) scale(1 -1)">
+      <rect x="510" y="145" width="516" height="260" rx="48" ry="48"
+            stroke="url(#orange)" stroke-width="36"/>
+
+      <path d="M766 205
+               C778 205 790 211 799 221
+               L868 297
+               C887 318 872 352 843 352
+               H689
+               C660 352 645 318 664 297
+               L733 221
+               C742 211 754 205 766 205Z"
+            fill="url(#orange)"/>
+
+      <path d="M577 488
+               C700 580 833 580 955 488"
+            stroke="url(#orange)" stroke-width="76" stroke-linecap="round"/>
+
+      <path d="M414 633
+               C610 823 922 823 1118 633"
+            stroke="url(#orange)" stroke-width="84" stroke-linecap="round"/>
+    </g>
+  </g>
+</svg>

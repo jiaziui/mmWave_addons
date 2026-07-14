@@ -3,9 +3,11 @@ import path from "path";
 import express, { NextFunction, Request, Response } from "express";
 import pinoHttp from "pino-http";
 import type { AppConfig } from "./config";
+import { BaseMapStorage } from "./config/baseMapStorage";
 import type { MmwaveService } from "./domain/mmwaveService";
 import { logger } from "./logger";
 import { createMetaRouter } from "./routes/meta";
+import { createBaseMapRouter } from "./routes/baseMaps";
 import { createMmwaveRouter } from "./routes/devices";
 
 export interface ServerDependencies {
@@ -29,6 +31,7 @@ export const createServer = (config: AppConfig, deps: ServerDependencies): expre
   app.use(express.json());
 
   app.use("/api/meta", createMetaRouter(config, deps.service));
+  app.use("/api/mmwave", createBaseMapRouter(new BaseMapStorage(config.dataDir)));
   app.use("/api/mmwave", createMmwaveRouter(deps.service));
 
   app.get("/api/health", (_req, res) => {

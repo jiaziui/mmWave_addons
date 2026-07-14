@@ -8,8 +8,10 @@ const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
 const express_1 = __importDefault(require("express"));
 const pino_http_1 = __importDefault(require("pino-http"));
+const baseMapStorage_1 = require("./config/baseMapStorage");
 const logger_1 = require("./logger");
 const meta_1 = require("./routes/meta");
+const baseMaps_1 = require("./routes/baseMaps");
 const devices_1 = require("./routes/devices");
 const utf8StaticExtensions = new Set([".html", ".js", ".css", ".svg"]);
 const withUtf8Charset = (contentType) => /;\s*charset=/i.test(contentType) ? contentType : `${contentType}; charset=utf-8`;
@@ -21,6 +23,7 @@ const createServer = (config, deps) => {
     }));
     app.use(express_1.default.json());
     app.use("/api/meta", (0, meta_1.createMetaRouter)(config, deps.service));
+    app.use("/api/mmwave", (0, baseMaps_1.createBaseMapRouter)(new baseMapStorage_1.BaseMapStorage(config.dataDir)));
     app.use("/api/mmwave", (0, devices_1.createMmwaveRouter)(deps.service));
     app.get("/api/health", (_req, res) => {
         res.json({ status: "ok" });
