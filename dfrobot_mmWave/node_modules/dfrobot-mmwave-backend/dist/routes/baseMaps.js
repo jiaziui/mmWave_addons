@@ -57,6 +57,14 @@ const createBaseMapRouter = (storage) => {
             }
         });
     });
+    router.delete("/base-maps/user/:assetId", (req, res) => {
+        const deleted = storage.deleteAsset(req.params.assetId);
+        if (!deleted) {
+            res.status(404).json({ ok: false, error: "Base map asset not found" });
+            return;
+        }
+        res.json({ ok: true });
+    });
     return router;
 };
 exports.createBaseMapRouter = createBaseMapRouter;

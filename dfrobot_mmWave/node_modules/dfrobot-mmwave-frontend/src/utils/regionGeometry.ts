@@ -27,7 +27,7 @@ export const normalizeRegionDefinition = (region: RegionDefinition): RegionDefin
   x: region.geometry.centerXCm / 100,
   y: region.geometry.centerYCm / 100,
   ioIndex: region.regionType === "status_detection" ? region.ioIndex : 0,
-  mcuIo: region.regionType === "status_detection" && region.index < 6 ? region.mcuIo : -1,
+  mcuIo: region.regionType === "status_detection" && region.ioIndex !== 0 ? region.mcuIo : -1,
 });
 
 export const validateRegionDefinition = (
@@ -37,9 +37,22 @@ export const validateRegionDefinition = (
   if (!region.label.trim()) return "请输入区域名称";
   if (!Number.isInteger(region.index) || region.index < 0 || region.index > 31) return "区域索引必须为 0 到 31";
   if (existingRegions.some((entry) => entry.id !== region.id && entry.index === region.index)) return "区域索引已存在";
+  if (
+    region.enabled &&
+    region.regionType === "status_detection" &&
+    region.ioIndex !== 0 &&
+    existingRegions.some((entry) =>
+      entry.id !== region.id &&
+      entry.enabled &&
+      entry.regionType === "status_detection" &&
+      entry.ioIndex === region.ioIndex,
+    )
+  ) return `IO${region.ioIndex} 已被其他状态检测区域使用`;
   if (region.geometry.shape === "rect" && (region.geometry.widthCm < 10 || region.geometry.heightCm < 10)) return "矩形宽高不能小于 10cm";
   if (region.geometry.shape === "circle" && region.geometry.radiusCm < 10) return "圆形半径不能小于 10cm";
-  if (region.mcuIo < -1 || region.mcuIo > 255) return "MCU IO 必须在 -1 到 255 之间";
+  if (region.regionType === "status_detection" && region.ioIndex !== 0 && (region.mcuIo < -1 || region.mcuIo > 255)) {
+    return "MCU IO 必须在 -1 到 255 之间";
+  }
   return null;
 };
 

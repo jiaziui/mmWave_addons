@@ -1,6 +1,36 @@
 export type DetectionMode = 1 | 2;
 export type RegionType = "status_detection" | "noise" | "approach_depart" | "boundary" | "empty_tag";
 export type DetectionRangeMode = "rect" | "learned" | "custom";
+export type LearnedRangeStatus =
+  | "idle"
+  | "confirming_single_target"
+  | "starting"
+  | "learning"
+  | "stopping"
+  | "querying"
+  | "ready"
+  | "error";
+
+export interface LearnedRangeRuntime {
+  status: LearnedRangeStatus;
+  learningEnabled: boolean;
+  singleTargetConfirmCount: number;
+  pointCount: number;
+  pointsCm: Array<{ x: number; y: number }>;
+  error?: string;
+  message?: string;
+  updatedAt: string;
+}
+export type DeviceLogEventType = "status_changed" | "approach" | "away" | "enter" | "exit";
+export type DeviceLogRetentionMode = "forever" | "limited" | "none";
+export type DeviceLogRetentionUnit = "day" | "week" | "month" | "year";
+
+export interface DeviceLogRetention {
+  mode: DeviceLogRetentionMode;
+  value?: number;
+  unit?: DeviceLogRetentionUnit;
+  updatedAt: string;
+}
 
 export interface RangeBox {
   xMin: number;
@@ -52,6 +82,11 @@ export interface BaseMapInstance {
   zIndex: number;
 }
 
+export interface RegionViewPreferences {
+  gridVisible: boolean;
+  backgroundVisible: boolean;
+}
+
 export interface StoredRegionConfig {
   version: 2;
   coordinate: RangeBox;
@@ -59,9 +94,13 @@ export interface StoredRegionConfig {
   detection: DetectionRangeConfig;
   regions: RegionDefinition[];
   backgroundInstances: BaseMapInstance[];
+  viewPreferences?: RegionViewPreferences;
   syncState: {
     fourSidedRange: "synced" | "pending" | "local_only";
     regionMcuIo: "synced" | "pending" | "local_only";
+    tagConfig: "synced" | "pending" | "local_only";
+    customRange: "synced" | "pending" | "local_only";
+    learnedRange: "synced" | "pending" | "local_only";
     updatedAt?: string;
   };
 }
@@ -118,6 +157,7 @@ export interface StoredMmwaveDevice {
   installInfo?: { installMode: "side"; installAngleDeg: 0; installHeightM: number };
   detectionMode?: DetectionMode;
   deviceSettings?: C4004DeviceSettings;
+  logRetention?: DeviceLogRetention;
   discovery: {
     status: "online" | "offline";
     signal: number;
@@ -137,6 +177,12 @@ export interface RegionOverlay {
   y: number;
   regionType?: RegionType;
   geometry?: RegionGeometryMeters;
+  tagIndex?: number;
+  tagType?: "none" | "boundary" | "approach_away" | "people_counting" | "noise";
+  tagTypeCode?: number;
+  tagDataAvailable?: boolean;
+  tagUpdatedAt?: string;
+  tagTypeMismatch?: boolean;
   movingCount?: number;
   staticCount?: number;
   boundaryState?: string;
@@ -175,6 +221,9 @@ export interface MmwaveOverviewDeviceCard {
   detection: DetectionRangeConfig;
   regions: RegionOverlay[];
   targets: TrajectoryPoint[];
+  backgroundInstances?: BaseMapInstance[];
+  viewPreferences?: RegionViewPreferences;
+  deploymentName?: string;
 }
 
 export interface MmwaveDeviceDetail extends MmwaveOverviewDeviceCard {
@@ -185,6 +234,39 @@ export interface MmwaveDeviceDetail extends MmwaveOverviewDeviceCard {
   ioStates: Array<{ id: string; label: string; active: boolean }>;
   basics: Array<{ key: string; label: string; value: string }>;
   actions: { canReset: boolean; canRefresh: boolean; canManageRegions: boolean };
+  learnedRange: LearnedRangeRuntime;
+}
+
+export interface DeviceLogEntry {
+  occurredAt: string;
+  localDate: string;
+  deviceName: string;
+  deploymentName: string;
+  regionIndex: number;
+  regionLabel: string;
+  regionType: RegionType;
+  eventType: DeviceLogEventType;
+  movingCount?: number;
+  staticCount?: number;
+  totalCount?: number;
+  message: string;
+}
+
+export interface DeviceLogCalendar {
+  year: number;
+  month: number;
+  years: number[];
+  months: number[];
+  days: number[];
+}
+
+export interface DeviceLogPage {
+  date: string;
+  page: number;
+  pageSize: number;
+  total: number;
+  hasMore: boolean;
+  logs: DeviceLogEntry[];
 }
 
 export interface MmwaveDeviceConfig {
@@ -199,11 +281,15 @@ export interface MmwaveDeviceConfig {
   detectionMode?: DetectionMode;
   regionConfig: StoredRegionConfig;
   deviceSettings: C4004DeviceSettings;
+  logRetention: DeviceLogRetention;
+  nextCleanupAt: string;
 }
 
 export interface ConfigApplyResult {
   fourSidedRange: "applied" | "failed" | "skipped";
   regionMcuIo: "applied" | "failed" | "skipped";
+  tagConfig: "applied" | "failed" | "skipped";
+  customRange: "applied" | "failed" | "skipped";
   warnings: string[];
 }
 
@@ -234,8 +320,41 @@ export const ingressAware = (relativePath: string): string => {
   return `${base}${relativePath.replace(/^\/+/, "")}`;
 };
 
-const localMockEnabled = (): boolean =>
-  ["localhost", "127.0.0.1"].includes(window.location.hostname) && new URLSearchParams(window.location.search).get("mock") === "1";
+const LOCAL_MOCK_STORAGE_KEY = "dfrobot_mmwave_local_mock";
+
+/** Cursor Simple Browser may turn `?mock=1` into `?mock%3D1` (param name becomes `mock=1`). */
+const queryRequestsLocalMock = (search: string): boolean => {
+  const params = new URLSearchParams(search);
+  if (params.get("mock") === "1") {
+    return true;
+  }
+  if (params.has("mock=1")) {
+    return true;
+  }
+  return /(?:^|[?&])mock(?:=|%3[Dd])1(?:&|$)/.test(search);
+};
+
+const localMockEnabled = (): boolean => {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  if (!["localhost", "127.0.0.1"].includes(window.location.hostname)) {
+    return false;
+  }
+  if (queryRequestsLocalMock(window.location.search)) {
+    try {
+      sessionStorage.setItem(LOCAL_MOCK_STORAGE_KEY, "1");
+    } catch {
+      // ignore quota / private mode
+    }
+    return true;
+  }
+  try {
+    return sessionStorage.getItem(LOCAL_MOCK_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+};
 
 export const isLocalMockMode = (): boolean => localMockEnabled();
 
@@ -264,6 +383,27 @@ export const fetchOverview = async (): Promise<{ ok: boolean; metrics: MmwaveOve
   localMockEnabled() ? (await mockApi()).mockFetchOverview() : handle(await fetch(ingressAware("api/mmwave/overview")));
 export const fetchDeviceDetail = async (deviceId: string): Promise<{ ok: boolean; detail: MmwaveDeviceDetail }> =>
   localMockEnabled() ? (await mockApi()).mockFetchDetail(deviceId) : handle(await fetch(ingressAware(`api/mmwave/devices/${encodeURIComponent(deviceId)}/detail`)));
+export const fetchDeviceLogCalendar = async (
+  deviceId: string,
+  year: number,
+  month: number,
+): Promise<{ ok: boolean } & DeviceLogCalendar> =>
+  localMockEnabled()
+    ? (await mockApi()).mockFetchDeviceLogCalendar(deviceId, year, month)
+    : handle(await fetch(ingressAware(
+        `api/mmwave/devices/${encodeURIComponent(deviceId)}/logs/calendar?year=${year}&month=${month}`,
+      )));
+export const fetchDeviceLogs = async (
+  deviceId: string,
+  date: string,
+  page = 1,
+  pageSize = 50,
+): Promise<{ ok: boolean } & DeviceLogPage> =>
+  localMockEnabled()
+    ? (await mockApi()).mockFetchDeviceLogs(deviceId, date, page, pageSize)
+    : handle(await fetch(ingressAware(
+        `api/mmwave/devices/${encodeURIComponent(deviceId)}/logs?date=${encodeURIComponent(date)}&page=${page}&pageSize=${pageSize}`,
+      )));
 export const fetchDeviceConfig = async (deviceId: string): Promise<{ ok: boolean; config: MmwaveDeviceConfig }> =>
   localMockEnabled() ? (await mockApi()).mockFetchConfig(deviceId) : handle(await fetch(ingressAware(`api/mmwave/devices/${encodeURIComponent(deviceId)}/config`)));
 
@@ -272,7 +412,8 @@ export const updateDeviceConfig = async (
   payload: {
     deviceSettings?: C4004DeviceSettings;
     regionConfig?: StoredRegionConfig;
-    apply?: { fourSidedRange?: boolean; regionMcuIo?: boolean };
+    logRetention?: Omit<DeviceLogRetention, "updatedAt">;
+    apply?: { fourSidedRange?: boolean; regionMcuIo?: boolean; tagConfig?: boolean; customRange?: boolean };
   },
 ): Promise<{ ok: boolean; config: MmwaveDeviceConfig; applyResult: ConfigApplyResult }> =>
   localMockEnabled() ? (await mockApi()).mockUpdateConfig(deviceId, payload) : handle(await fetch(ingressAware(`api/mmwave/devices/${encodeURIComponent(deviceId)}/config`), {
@@ -300,6 +441,14 @@ export const initializeDevice = async (
 ): Promise<{ ok: boolean; device: StoredMmwaveDevice }> =>
   localMockEnabled() ? (await mockApi()).mockInitializeDevice(deviceId, payload) : postDeviceAction(deviceId, "initialize", payload);
 
+export const learnedRangeAction = async (
+  deviceId: string,
+  action: "start" | "stop" | "query",
+): Promise<{ ok: boolean; learnedRange: LearnedRangeRuntime; detail?: MmwaveDeviceDetail }> =>
+  localMockEnabled()
+    ? (await mockApi()).mockLearnedRangeAction(deviceId, action)
+    : postDeviceAction(deviceId, "learned-range", { action });
+
 export const fetchUserBaseMaps = async (): Promise<{ ok: boolean; assets: UserBaseMapAsset[] }> =>
   localMockEnabled() ? { ok: true, assets: [] } : handle(await fetch(ingressAware("api/mmwave/base-maps/user")));
 export const userBaseMapUrl = (assetId: string): string =>
@@ -312,3 +461,7 @@ export const uploadUserBaseMap = async (assetId: string, file: File): Promise<{ 
     body,
   }));
 };
+export const deleteUserBaseMap = async (assetId: string): Promise<{ ok: boolean }> =>
+  handle(await fetch(ingressAware(`api/mmwave/base-maps/user/${encodeURIComponent(assetId)}`), {
+    method: "DELETE",
+  }));

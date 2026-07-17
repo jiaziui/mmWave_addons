@@ -74,7 +74,11 @@ const resolveStatusFromStates = (relatedStates) => relatedStates.some((state) =>
     ? "online"
     : "offline";
 const resolveStatusForPrefix = (prefix, relatedStates) => {
-    const onlineState = relatedStates.find((state) => state.entity_id === `binary_sensor.${prefix}_online`);
+    const expectedObjectId = `${prefix}_online`;
+    const onlineState = relatedStates.find((state) => {
+        const objectId = objectIdFromEntityId(state.entity_id);
+        return state.entity_id.startsWith("binary_sensor.") && objectId.replace(/_\d+$/, "") === expectedObjectId;
+    });
     if (onlineState) {
         const normalized = onlineState.state.toLowerCase();
         return normalized === "on" || normalized === "online" || normalized === "true" ? "online" : "offline";
@@ -97,9 +101,17 @@ const selectDeviceIdForPrefix = (prefix, context) => {
 };
 const resolveRelatedStates = (prefix, deviceId, context) => context.states.filter((state) => {
     const objectId = objectIdFromEntityId(state.entity_id);
-    return objectId.startsWith(`${prefix}_`) || (deviceId && context.entityRegistry.get(state.entity_id)?.device_id === deviceId);
+    if (!objectId.startsWith(`${prefix}_`)) {
+        return false;
+    }
+    return !deviceId || context.entityRegistry.get(state.entity_id)?.device_id === deviceId;
 });
-const matchesCandidate = (left, right) => left.prefix === right.prefix;
+const matchesCandidate = (left, right) => {
+    if (left.deviceId || right.deviceId) {
+        return left.deviceId === right.deviceId && left.prefix === right.prefix;
+    }
+    return left.prefix === right.prefix;
+};
 const candidatePriority = (candidate) => PROFILE_SOURCE_PRIORITY[candidate.profileSource];
 const upsertCandidate = (candidates, nextCandidate) => {
     const index = candidates.findIndex((current) => matchesCandidate(current, nextCandidate));
@@ -157,51 +169,84 @@ const buildCandidateFromPrefix = (context, profileId, prefix, profileSource, see
         entityCount: seed?.entityCount ?? relatedStates.length,
     };
 };
-const matchSignatureState = (state, signatures) => {
-    const [domain, objectId] = state.entity_id.split(".", 2);
+const matchSignatureEntity = (entityId, signatures) => {
+    const [domain, objectId] = entityId.split(".", 2);
     if (!domain || !objectId) {
         return null;
     }
     for (const signature of signatures) {
-        if (signature.domain !== domain || !objectId.endsWith(`_${signature.slug}`)) {
+        if (signature.domain !== domain) {
             continue;
         }
+        const signatureSuffix = `_${signature.slug}`;
+        let normalizedObjectId = objectId;
+        if (!normalizedObjectId.endsWith(signatureSuffix)) {
+            // Home Assistant appends _2, _3, ... when another integration already owns the entity id.
+            normalizedObjectId = normalizedObjectId.replace(/_\d+$/, "");
+            if (!normalizedObjectId.endsWith(signatureSuffix)) {
+                continue;
+            }
+        }
         return {
-            prefix: objectId.slice(0, objectId.length - signature.slug.length - 1),
+            prefix: normalizedObjectId.slice(0, normalizedObjectId.length - signatureSuffix.length),
             signature,
         };
     }
     return null;
 };
-const discoverByConfiguredSignatures = (context) => {
+const discoverByConfiguredSignatures = (context, logger) => {
     const candidates = [];
+    const entityIds = new Set([
+        ...context.states.map((state) => state.entity_id),
+        ...context.entityRegistryEntries.map((entry) => entry.entity_id),
+    ]);
     for (const definition of PROFILE_DEFINITIONS) {
         const signatures = [...definition.entitySignature.entities].sort((left, right) => right.slug.length - left.slug.length);
         if (!signatures.length) {
             continue;
         }
-        const matchedSignaturesByPrefix = new Map();
-        for (const state of context.states) {
-            const match = matchSignatureState(state, signatures);
+        const matchedGroups = new Map();
+        for (const entityId of entityIds) {
+            const match = matchSignatureEntity(entityId, signatures);
             if (!match) {
                 continue;
             }
+            const deviceId = context.entityRegistry.get(entityId)?.device_id ?? undefined;
+            const groupKey = deviceId ? `${deviceId}\u0000${match.prefix}` : `prefix\u0000${match.prefix}`;
             const key = `${match.signature.domain}.${match.signature.slug}`;
-            const matches = matchedSignaturesByPrefix.get(match.prefix) ?? new Set();
-            matches.add(key);
-            matchedSignaturesByPrefix.set(match.prefix, matches);
+            const group = matchedGroups.get(groupKey) ?? {
+                prefix: match.prefix,
+                deviceId,
+                matches: new Set(),
+                entityIds: new Set(),
+            };
+            group.matches.add(key);
+            group.entityIds.add(entityId);
+            matchedGroups.set(groupKey, group);
         }
-        for (const [prefix, matches] of matchedSignaturesByPrefix) {
-            if (matches.size < definition.entitySignature.minScore) {
+        for (const group of matchedGroups.values()) {
+            const matchedSignatures = [...group.matches].sort();
+            const accepted = group.matches.size >= definition.entitySignature.minScore;
+            logger?.info({
+                profileId: definition.id,
+                deviceId: group.deviceId ?? null,
+                prefix: group.prefix,
+                matchedCount: group.matches.size,
+                requiredCount: definition.entitySignature.minScore,
+                matchedSignatures,
+                matchedEntityCount: group.entityIds.size,
+                accepted,
+            }, "mmWave profile signature evaluated");
+            if (!accepted) {
                 continue;
             }
-            const deviceId = selectDeviceIdForPrefix(prefix, context);
-            const relatedStates = resolveRelatedStates(prefix, deviceId, context);
-            const candidate = buildCandidateFromPrefix(context, definition.id, prefix, "signature", {
-                score: matches.size,
-                status: resolveStatusForPrefix(prefix, relatedStates),
+            const deviceId = group.deviceId ?? selectDeviceIdForPrefix(group.prefix, context);
+            const relatedStates = resolveRelatedStates(group.prefix, deviceId, context);
+            const candidate = buildCandidateFromPrefix(context, definition.id, group.prefix, "signature", {
+                score: group.matches.size,
+                status: resolveStatusForPrefix(group.prefix, relatedStates),
                 deviceId,
-                entityCount: relatedStates.length,
+                entityCount: group.entityIds.size,
             });
             if (candidate) {
                 candidates.push(candidate);
@@ -248,10 +293,16 @@ const buildProfileDiscoveryContext = async (client) => {
     };
 };
 exports.buildProfileDiscoveryContext = buildProfileDiscoveryContext;
-const resolveDiscoveredProfiles = async (client, existingDevices = []) => {
+const resolveDiscoveredProfiles = async (client, existingDevices = [], logger) => {
     const context = await (0, exports.buildProfileDiscoveryContext)(client);
     const candidates = [];
-    for (const candidate of discoverByConfiguredSignatures(context)) {
+    logger?.info({
+        stateCount: context.states.length,
+        entityRegistryCount: context.entityRegistryEntries.length,
+        deviceRegistryCount: context.deviceRegistryEntries.length,
+        existingDeviceCount: existingDevices.length,
+    }, "mmWave discovery source data loaded");
+    for (const candidate of discoverByConfiguredSignatures(context, logger)) {
         upsertCandidate(candidates, candidate);
     }
     for (const state of context.states) {
@@ -264,7 +315,9 @@ const resolveDiscoveredProfiles = async (client, existingDevices = []) => {
             continue;
         }
         const prefix = objectId.slice(0, objectId.length - DEVICE_PROFILE_SUFFIX.length);
-        const markerCandidate = buildCandidateFromPrefix(context, markerValue, prefix, "marker");
+        const markerCandidate = buildCandidateFromPrefix(context, markerValue, prefix, "marker", {
+            deviceId: context.entityRegistry.get(state.entity_id)?.device_id ?? undefined,
+        });
         if (markerCandidate) {
             upsertCandidate(candidates, markerCandidate);
         }
@@ -305,6 +358,21 @@ const resolveDiscoveredProfiles = async (client, existingDevices = []) => {
             upsertCandidate(candidates, overrideCandidate);
         }
     }
-    return candidates.sort((left, right) => right.score - left.score || left.prefix.localeCompare(right.prefix));
+    const sortedCandidates = candidates.sort((left, right) => right.score - left.score || left.prefix.localeCompare(right.prefix));
+    logger?.info({
+        candidateCount: sortedCandidates.length,
+        candidates: sortedCandidates.map((candidate) => ({
+            deviceId: candidate.deviceId ?? null,
+            prefix: candidate.prefix,
+            profileId: candidate.profileId,
+            profileSource: candidate.profileSource,
+            profileStatus: candidate.profileStatus,
+            status: candidate.status,
+            score: candidate.score,
+            entityCount: candidate.entityCount,
+            name: candidate.deviceName,
+        })),
+    }, "mmWave profile discovery completed");
+    return sortedCandidates;
 };
 exports.resolveDiscoveredProfiles = resolveDiscoveredProfiles;

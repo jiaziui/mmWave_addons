@@ -9,6 +9,12 @@ const parseSignedBitInt16 = (high: number, low: number): number => {
   return negative ? -magnitude : magnitude;
 };
 
+export const toDisplayTrajectoryPoints = (points: readonly TrajectoryPoint[]): TrajectoryPoint[] =>
+  points.map((point) => ({
+    ...point,
+    x: -point.x,
+  }));
+
 export const parseTargetTrajectoryHex = (hex: string): TrajectoryPoint[] => {
   const normalized = normalizeHex(hex);
   if (normalized.length < 2 || normalized.length % 2 !== 0) {
@@ -50,12 +56,14 @@ export const parseTrajectorySnapshot = (topic: string, payload: string): Traject
     }
 
     const hex = normalizeHex(parsed.hex);
+    const points = parseTargetTrajectoryHex(hex);
+    const parsedTargetCount = typeof parsed.target_count === "number" ? parsed.target_count : undefined;
     return {
       topic,
       topicPrefix: typeof parsed.device_topic_prefix === "string" ? parsed.device_topic_prefix : "",
       mqttKey: typeof parsed.mqtt_key === "string" ? parsed.mqtt_key : "main",
-      targetCount: typeof parsed.target_count === "number" ? parsed.target_count : 0,
-      points: parseTargetTrajectoryHex(hex),
+      targetCount: Math.max(parsedTargetCount ?? 0, points.length),
+      points,
       hex,
       updatedAt: new Date().toISOString(),
     };

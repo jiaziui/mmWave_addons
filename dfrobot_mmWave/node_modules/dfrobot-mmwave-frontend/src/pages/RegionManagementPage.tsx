@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  deleteUserBaseMap,
   fetchDeviceConfig,
   fetchDeviceDetail,
   fetchUserBaseMaps,
   updateDeviceConfig,
+  uploadUserBaseMap,
   userBaseMapUrl,
   type BaseMapInstance,
   type C4004DeviceSettings,
@@ -26,22 +28,22 @@ import {
 } from "../utils/regionGeometry";
 import { createClientId } from "../utils/clientId";
 import {
-  buildDetectionExportPayload,
-  buildRegionExportPayload,
-  downloadJson,
+  canExportCustomRange,
+  downloadText,
   formatRegionLiveInfo,
   getDetectionHint,
+  mergeImportedRegions,
   MCU_IO_OPTIONS,
+  parseCustomRangeIni,
+  parseRegionIni,
   parseImportedDetection,
   parseImportedRegions,
+  serializeCustomRangeIni,
+  serializeRegionIni,
   type ImportedBackgroundSource,
 } from "../utils/regionManagement";
-
-const systemModules = import.meta.glob("../../resource/base_map/system/*.{png,jpg,jpeg,webp}", {
-  eager: true,
-  query: "?url",
-  import: "default",
-}) as Record<string, string>;
+import { listSystemBaseMapAssets } from "../utils/baseMapAssets";
+import { useMmwaveLiveRefresh } from "../hooks/useMmwaveLiveRefresh";
 
 type Panel = "regions" | "detection" | "parameters" | "background" | "edit" | null;
 type LibraryAsset = { id: string; sourceType: "system" | "user"; name: string; url: string };
@@ -67,6 +69,7 @@ const BASE_CELL = 40;
 const MIN_CELL = 16;
 const MAX_CELL = 160;
 const ZOOM_FACTOR = 1.1;
+const OVERALL_REGION_ID = "__overall_region__";
 
 const REGION_LABELS: Record<RegionType, string> = {
   status_detection: "状态检测",
@@ -95,6 +98,22 @@ const parameterFields = [
 ] as const;
 
 const cloneConfig = (config: StoredRegionConfig): StoredRegionConfig => structuredClone(config);
+
+/** Approximate SVG label background width for mixed CJK/ASCII text. */
+const estimateChineseLabelWidth = (text: string, charPx: number, paddingPx: number) => {
+  let units = 0;
+  for (const char of text) {
+    units += /[\u3400-\u9FFF\uF900-\uFAFF\u3000-\u303F\uFF00-\uFFEF]/.test(char) ? 1 : 0.55;
+  }
+  return units * charPx + paddingPx;
+};
+
+const resolveViewPreferences = (config: StoredRegionConfig) => ({
+  gridVisible: config.viewPreferences?.gridVisible ?? true,
+  backgroundVisible:
+    config.viewPreferences?.backgroundVisible ??
+    config.backgroundInstances.some((instance) => instance.visible),
+});
 const centerOf = (geometry: RegionGeometry) => ({ x: geometry.centerXCm, y: geometry.centerYCm });
 /** Stable place width so every asset lands at the same physical size (aspect from image). */
 const BACKGROUND_PLACE_WIDTH_CM = 200;
@@ -126,11 +145,11 @@ type BackgroundCatalogItem = {
 };
 type BackgroundCatalogFilter = "all" | "system" | "user";
 
-const systemAssets: LibraryAsset[] = Object.entries(systemModules).map(([filePath, url]) => ({
-  id: filePath.split("/").pop()?.replace(/\.[^.]+$/, "") ?? filePath,
+const systemAssets: LibraryAsset[] = listSystemBaseMapAssets().map((asset) => ({
+  id: asset.id,
   sourceType: "system",
-  name: decodeURIComponent(filePath.split("/").pop() ?? "官方底图"),
-  url,
+  name: asset.name,
+  url: asset.url,
 }));
 
 export function RegionManagementPage({
@@ -154,6 +173,7 @@ export function RegionManagementPage({
   const [activePanel, setActivePanel] = useState<Panel>(null);
   const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null);
   const [regionDraft, setRegionDraft] = useState<RegionDefinition | null>(null);
+  const [overallMcuIoDraft, setOverallMcuIoDraft] = useState<number | null>(null);
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
   const [selectedBackgroundId, setSelectedBackgroundId] = useState<string | null>(null);
   const [gridVisible, setGridVisible] = useState(true);
@@ -180,6 +200,7 @@ export function RegionManagementPage({
   const sideColumnRef = useRef<HTMLDivElement>(null);
   const configRef = useRef<MmwaveDeviceConfig | null>(null);
   const detailLoadingRef = useRef(false);
+  const detailRefreshPendingRef = useRef(false);
   const touchPointsRef = useRef(new Map<number, { x: number; y: number }>());
   const pinchRef = useRef<{ distance: number; cellSize: number; worldX: number; worldY: number } | null>(null);
   const viewportCenteredRef = useRef(false);
@@ -189,6 +210,7 @@ export function RegionManagementPage({
   const regionEditIsNewRef = useRef(false);
   const dirtyBeforeRegionEditRef = useRef(false);
   const regionDraftRef = useRef<RegionDefinition | null>(null);
+  const activeDeviceIdRef = useRef<string | null>(selectedDevice?.id ?? null);
   const detectionBaselineRef = useRef<{
     detection: StoredRegionConfig["detection"];
     rangeBox: StoredRegionConfig["rangeBox"];
@@ -201,6 +223,7 @@ export function RegionManagementPage({
   };
 
   regionDraftRef.current = regionDraft;
+  activeDeviceIdRef.current = selectedDevice?.id ?? null;
 
   useEffect(() => {
     if (boundDevices[0] && !boundDevices.some((device) => device.id === selectedDeviceId)) {
@@ -215,10 +238,14 @@ export function RegionManagementPage({
       return;
     }
     let cancelled = false;
+    setCurrentConfig(null);
+    setDetail(null);
+    setSaving(false);
     setLoading(true);
     setSelectedRegionId(null);
     setSelectedBackgroundId(null);
     setRegionDraft(null);
+    setOverallMcuIoDraft(null);
     regionEditBaselineRef.current = null;
     regionEditIsNewRef.current = false;
     regionDraftRef.current = null;
@@ -230,7 +257,17 @@ export function RegionManagementPage({
       .then(([configResult, detailResult, mapsResult]) => {
         if (cancelled) return;
         if (configResult.status === "rejected") throw configResult.reason;
-        setCurrentConfig(configResult.value.config);
+        const config = configResult.value.config;
+        const prefs = resolveViewPreferences(config.regionConfig);
+        setCurrentConfig({
+          ...config,
+          regionConfig: {
+            ...config.regionConfig,
+            viewPreferences: prefs,
+          },
+        });
+        setGridVisible(prefs.gridVisible);
+        setBackgroundVisible(prefs.backgroundVisible);
         setDetail(detailResult.status === "fulfilled" ? detailResult.value.detail : null);
         setUserAssets(mapsResult.status === "fulfilled" ? mapsResult.value.assets : []);
         setDirty(false);
@@ -267,23 +304,47 @@ export function RegionManagementPage({
     if (pointerMoveFrameRef.current !== null) window.cancelAnimationFrame(pointerMoveFrameRef.current);
   }, []);
 
+  const refreshDetail = async () => {
+    const targetDeviceId = activeDeviceIdRef.current;
+    if (!targetDeviceId || document.hidden) return;
+    if (detailLoadingRef.current) {
+      detailRefreshPendingRef.current = true;
+      return;
+    }
+    detailLoadingRef.current = true;
+    try {
+      const response = await fetchDeviceDetail(targetDeviceId);
+      if (activeDeviceIdRef.current === targetDeviceId) {
+        setDetail(response.detail);
+      }
+    } catch {
+      // Keep the last successful runtime state visible.
+    } finally {
+      detailLoadingRef.current = false;
+      if (detailRefreshPendingRef.current) {
+        detailRefreshPendingRef.current = false;
+        void refreshDetail();
+      }
+    }
+  };
+
   useEffect(() => {
     if (!selectedDevice) return;
-    const refresh = async () => {
-      if (detailLoadingRef.current || document.hidden) return;
-      detailLoadingRef.current = true;
-      try {
-        const response = await fetchDeviceDetail(selectedDevice.id);
-        setDetail(response.detail);
-      } catch {
-        // Keep the last successful runtime state visible.
-      } finally {
-        detailLoadingRef.current = false;
-      }
-    };
-    const timer = window.setInterval(() => void refresh(), 2000);
+    void refreshDetail();
+    const timer = window.setInterval(() => void refreshDetail(), 2000);
     return () => window.clearInterval(timer);
   }, [selectedDevice?.id]);
+
+  useMmwaveLiveRefresh(
+    selectedDevice ? { scope: "device", deviceId: selectedDevice.id } : null,
+    (subscription) => {
+      if (subscription.scope !== "device") {
+        return;
+      }
+      void refreshDetail();
+    },
+    onError,
+  );
 
   const readOnly = !detail?.online;
   const regionConfig = deviceConfig?.regionConfig ?? null;
@@ -297,12 +358,37 @@ export function RegionManagementPage({
     })),
   ];
   const sourceUrl = (sourceType: "system" | "user", sourceId: string) => {
-    const imported = importedBackgroundSources.find((entry) => entry.id === sourceId);
-    if (imported) return imported.url;
     return libraryAssets.find((asset) => asset.sourceType === sourceType && asset.id === sourceId)?.url ?? "";
   };
 
+  const uploadBackgroundFile = async (file: File) => {
+    if (readOnly) return;
+    if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
+      setBackgroundMessage("Please upload a PNG, JPEG, or WebP image.");
+      return;
+    }
+    const assetId = createClientId();
+    setSaving(true);
+    try {
+      const response = await uploadUserBaseMap(assetId, file);
+      setUserAssets((current) => [...current.filter((asset) => asset.id !== response.asset.id), response.asset]);
+      setSelectedAssetId(response.asset.id);
+      setSelectedImportedSourceId(null);
+      setActivePanel("background");
+      applyViewPreferences({ backgroundVisible: true });
+      setBackgroundFilter("user");
+      setBackgroundMessage("Image saved. Select it and click Add.");
+      onMessage("图片已保存到素材库");
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "图片上传失败");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const importBackgroundFile = (file: File) => {
+    void uploadBackgroundFile(file);
+    return;
     if (readOnly) return;
     if (!file.type.startsWith("image/")) {
       setBackgroundMessage("请选择图片文件");
@@ -321,7 +407,7 @@ export function RegionManagementPage({
       setImportedBackgroundSources((current) => [...current, source]);
       setSelectedImportedSourceId(source.id);
       setActivePanel("background");
-      setBackgroundVisible(true);
+      applyViewPreferences({ backgroundVisible: true });
       setBackgroundMessage("图片已导入，请选中后点击添加");
       onMessage("图片已导入到底图库");
     };
@@ -333,51 +419,183 @@ export function RegionManagementPage({
     probe.src = url;
   };
 
+  const removeImportedBackgroundSource = async (sourceId: string) => {
+    if (readOnly) return;
+    const source = importedBackgroundSources.find((entry) => entry.id === sourceId) ?? null;
+    if (!source) return;
+    const confirmed = window.confirm(`确定删除已上传图片「${source.name}」吗？`);
+    if (!confirmed) return;
+
+    URL.revokeObjectURL(source.url);
+    setImportedBackgroundSources((current) => current.filter((entry) => entry.id !== sourceId));
+    if (selectedImportedSourceId === sourceId) {
+      setSelectedImportedSourceId(null);
+    }
+
+    if (deviceConfig?.regionConfig) {
+      const next = cloneConfig(deviceConfig.regionConfig);
+      const before = next.backgroundInstances.length;
+      next.backgroundInstances = next.backgroundInstances.filter(
+        (instance) => !(instance.sourceType === "user" && instance.sourceId === sourceId),
+      );
+      if (next.backgroundInstances.length !== before) {
+        const saved = await persistRegionConfig(next, undefined, { quiet: true });
+        if (!saved) {
+          onError("已删除本地上传图片，但当前设备画布同步失败");
+        }
+      }
+    }
+
+    setSelectedBackgroundId(null);
+    setBackgroundMessage("已删除上传图片");
+    onMessage("已删除上传图片");
+  };
+
+  const removeUserBaseMapAsset = async (assetId: string) => {
+    if (readOnly) return;
+    const asset = userAssets.find((entry) => entry.id === assetId) ?? null;
+    if (!asset) return;
+    const confirmed = window.confirm(`确定删除已上传图片「${asset.originalName}」吗？`);
+    if (!confirmed) return;
+
+    setSaving(true);
+    try {
+      await deleteUserBaseMap(assetId);
+      setUserAssets((current) => current.filter((entry) => entry.id !== assetId));
+      if (selectedAssetId === assetId) {
+        setSelectedAssetId(null);
+      }
+    } catch (error) {
+      setSaving(false);
+      onError(error instanceof Error ? error.message : "图片删除失败");
+      return;
+    }
+
+    if (deviceConfig?.regionConfig) {
+      const next = cloneConfig(deviceConfig.regionConfig);
+      const before = next.backgroundInstances.length;
+      next.backgroundInstances = next.backgroundInstances.filter(
+        (instance) => !(instance.sourceType === "user" && instance.sourceId === assetId),
+      );
+      if (next.backgroundInstances.length !== before) {
+        const saved = await persistRegionConfig(next, undefined, { quiet: true });
+        if (!saved) {
+          onError("已删除图片文件，但当前设备画布同步失败");
+        }
+      }
+    }
+
+    setSelectedBackgroundId(null);
+    setBackgroundMessage("Uploaded image deleted.");
+    onMessage("已删除上传图片");
+    setSaving(false);
+  };
+
   const persistRegionConfig = async (
     nextRegionConfig: StoredRegionConfig,
-    apply?: { fourSidedRange?: boolean; regionMcuIo?: boolean },
+    apply?: { fourSidedRange?: boolean; regionMcuIo?: boolean; tagConfig?: boolean; customRange?: boolean },
+    options?: { quiet?: boolean; requireApplied?: Array<"regionMcuIo" | "tagConfig">; refreshDetail?: boolean },
   ) => {
     if (!selectedDevice || !deviceConfig || readOnly) return false;
-    const optimistic = { ...deviceConfig, regionConfig: nextRegionConfig };
+    const targetDeviceId = selectedDevice.id;
+    const withPrefs: StoredRegionConfig = {
+      ...nextRegionConfig,
+      viewPreferences: nextRegionConfig.viewPreferences ?? resolveViewPreferences(nextRegionConfig),
+    };
+    const optimistic = { ...deviceConfig, regionConfig: withPrefs };
     setCurrentConfig(optimistic);
     setSaving(true);
     try {
-      const response = await updateDeviceConfig(selectedDevice.id, { regionConfig: nextRegionConfig, apply });
-      setCurrentConfig(response.config);
-      try {
-        const detailResponse = await fetchDeviceDetail(selectedDevice.id);
-        setDetail(detailResponse.detail);
-      } catch {
-        // The saved configuration remains authoritative if runtime refresh is unavailable.
+      const response = await updateDeviceConfig(targetDeviceId, { regionConfig: withPrefs, apply });
+      if (activeDeviceIdRef.current !== targetDeviceId) return true;
+      if (apply?.customRange && response.applyResult.customRange !== "applied") {
+        setCurrentConfig(optimistic);
+        setDirty(true);
+        onError(response.applyResult.warnings.join("；") || "自定义探测范围同步失败，当前草稿未保存");
+        return false;
       }
-      setDirty(false);
-      if (response.applyResult.warnings.length) {
-        onError(response.applyResult.warnings.join("；"));
-      } else {
-        onMessage("区域配置已保存");
+      setCurrentConfig(response.config);
+      const failedRequiredApply = options?.requireApplied?.find(
+        (key) => response.applyResult[key] !== "applied",
+      );
+      if (failedRequiredApply) {
+        setDirty(true);
+        onError(
+          response.applyResult.warnings.join("；") ||
+            `${failedRequiredApply === "regionMcuIo" ? "区域 MCU侧IO" : "标签配置"}未同步到设备，请重试`,
+        );
+        return false;
+      }
+      if (options?.refreshDetail !== false) {
+        try {
+          const detailResponse = await fetchDeviceDetail(targetDeviceId);
+          if (activeDeviceIdRef.current === targetDeviceId) {
+            setDetail(detailResponse.detail);
+          }
+        } catch {
+          // The saved configuration remains authoritative if runtime refresh is unavailable.
+        }
+      }
+      if (!options?.quiet) {
+        setDirty(false);
+        if (response.applyResult.warnings.length) {
+          onError(response.applyResult.warnings.join("；"));
+        } else {
+          onMessage("区域配置已保存");
+        }
       }
       return true;
     } catch (error) {
-      setDirty(true);
+      if (!options?.quiet) {
+        setDirty(true);
+      }
       onError(error instanceof Error ? error.message : "区域配置保存失败");
       return false;
     } finally {
-      setSaving(false);
+      if (activeDeviceIdRef.current === targetDeviceId) {
+        setSaving(false);
+      }
+    }
+  };
+
+  const applyViewPreferences = (patch: Partial<{ gridVisible: boolean; backgroundVisible: boolean }>) => {
+    const current = configRef.current?.regionConfig;
+    if (!current) return;
+    const nextPrefs = {
+      ...resolveViewPreferences(current),
+      ...patch,
+    };
+    if (patch.gridVisible !== undefined) setGridVisible(patch.gridVisible);
+    if (patch.backgroundVisible !== undefined) setBackgroundVisible(patch.backgroundVisible);
+    const next = cloneConfig(current);
+    next.viewPreferences = nextPrefs;
+    setCurrentConfig({ ...configRef.current!, regionConfig: next });
+    if (!readOnly) {
+      void persistRegionConfig(next, undefined, { quiet: true });
     }
   };
 
   const updateSettings = async (updates: C4004DeviceSettings) => {
     if (!selectedDevice || !deviceConfig || readOnly) return;
+    const targetDeviceId = selectedDevice.id;
     setSaving(true);
     try {
-      const response = await updateDeviceConfig(selectedDevice.id, { deviceSettings: updates });
+      const response = await updateDeviceConfig(targetDeviceId, { deviceSettings: updates });
+      if (activeDeviceIdRef.current !== targetDeviceId) return;
       setCurrentConfig(response.config);
       onMessage("设备参数已同步");
     } catch (error) {
       onError(error instanceof Error ? error.message : "设备参数同步失败");
     } finally {
-      setSaving(false);
+      if (activeDeviceIdRef.current === targetDeviceId) {
+        setSaving(false);
+      }
     }
+  };
+
+  const syncSettings = async () => {
+    if (!deviceConfig || readOnly) return;
+    await updateSettings({ ...(deviceConfig.deviceSettings ?? {}) });
   };
 
   const clearRegionEditSession = () => {
@@ -385,6 +603,7 @@ export function RegionManagementPage({
     regionEditIsNewRef.current = false;
     regionDraftRef.current = null;
     setRegionDraft(null);
+    setOverallMcuIoDraft(null);
     setSelectedRegionId(null);
   };
 
@@ -447,7 +666,7 @@ export function RegionManagementPage({
   };
 
   const togglePanel = (panel: Exclude<Panel, "edit">) => {
-    if (regionDraftRef.current || regionEditBaselineRef.current) {
+    if (regionDraftRef.current || regionEditBaselineRef.current || overallMcuIoDraft !== null) {
       discardRegionEdits({ nextPanel: "keep" });
     }
     const next = activePanel === panel ? null : panel;
@@ -460,7 +679,7 @@ export function RegionManagementPage({
       beginDetectionEdit();
     }
     if (next === "background") {
-      setBackgroundVisible(true);
+      applyViewPreferences({ backgroundVisible: true });
     }
     if (next !== "background") setSelectedBackgroundId(null);
   };
@@ -480,9 +699,43 @@ export function RegionManagementPage({
     dirtyBeforeRegionEditRef.current = options?.dirtyBefore ?? dirty;
     regionEditIsNewRef.current = Boolean(options?.isNew);
     regionEditBaselineRef.current = structuredClone(region);
+    setOverallMcuIoDraft(null);
     setSelectedRegionId(region.id);
     setRegionDraft(structuredClone(region));
     setActivePanel("edit");
+  };
+
+  const selectOverallRegion = () => {
+    if (activePanel === "detection" || detectionBaselineRef.current) {
+      discardDetectionEdits();
+    }
+    if (regionDraftRef.current || regionEditBaselineRef.current) {
+      discardRegionEdits({ nextPanel: "keep" });
+    }
+    clearRegionEditSession();
+    setSelectedRegionId(OVERALL_REGION_ID);
+    setOverallMcuIoDraft(deviceConfig?.deviceSettings.zone1McuIo ?? -1);
+    setActivePanel("edit");
+  };
+
+  const saveOverallRegion = async () => {
+    if (!selectedDevice || !deviceConfig || overallMcuIoDraft === null || readOnly) return;
+    const targetDeviceId = selectedDevice.id;
+    setSaving(true);
+    try {
+      const response = await updateDeviceConfig(targetDeviceId, {
+        deviceSettings: { zone1McuIo: overallMcuIoDraft },
+      });
+      if (activeDeviceIdRef.current !== targetDeviceId) return;
+      setCurrentConfig(response.config);
+      clearRegionEditSession();
+      setActivePanel("regions");
+      onMessage("整体区域 MCU侧IO 已同步");
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "整体区域 MCU侧IO 同步失败");
+    } finally {
+      if (activeDeviceIdRef.current === targetDeviceId) setSaving(false);
+    }
   };
 
   const updateRegionDraft = (next: RegionDefinition) => {
@@ -530,7 +783,10 @@ export function RegionManagementPage({
     const targetIndex = next.regions.findIndex((region) => region.id === normalizedDraft.id);
     if (targetIndex >= 0) next.regions[targetIndex] = normalizedDraft;
     else next.regions.push(normalizedDraft);
-    const saved = await persistRegionConfig(next, { regionMcuIo: normalizedDraft.regionType === "status_detection" && normalizedDraft.index < 6 });
+    const saved = await persistRegionConfig(next, {
+      regionMcuIo: true,
+      tagConfig: true,
+    });
     if (saved) {
       clearRegionEditSession();
       setSelectedRegionId(normalizedDraft.id);
@@ -547,10 +803,28 @@ export function RegionManagementPage({
     if (!regionConfig || !deleteTarget) return;
     const next = cloneConfig(regionConfig);
     next.regions = next.regions.filter((region) => region.id !== deleteTarget.id);
-    await persistRegionConfig(next);
+    const saved = await persistRegionConfig(
+      next,
+      { regionMcuIo: true, tagConfig: true },
+      { requireApplied: ["regionMcuIo", "tagConfig"] },
+    );
+    if (!saved) return;
     clearRegionEditSession();
     setActivePanel("regions");
     setDeleteTarget(null);
+  };
+
+  const syncAllRegions = async () => {
+    if (!regionConfig || readOnly) return;
+    await persistRegionConfig(
+      regionConfig,
+      {
+        fourSidedRange: regionConfig.detection.mode === "rect",
+        regionMcuIo: true,
+        tagConfig: true,
+      },
+      { refreshDetail: false },
+    );
   };
 
   const handleConfigImport = async (file: File) => {
@@ -560,27 +834,43 @@ export function RegionManagementPage({
     if (!importType) return;
     try {
       const text = await file.text();
-      const payload = JSON.parse(text) as unknown;
       if (importType === "detection") {
         const next = cloneConfig(regionConfig);
-        next.detection = parseImportedDetection(payload, regionConfig.detection);
-        next.rangeBox = {
-          xMin: next.detection.rectCm.xMin / 100,
-          xMax: next.detection.rectCm.xMax / 100,
-          yMin: next.detection.rectCm.yMin / 100,
-          yMax: next.detection.rectCm.yMax / 100,
+        const normalizedText = text.replace(/^\uFEFF/, "").trimStart();
+        const points = normalizedText.startsWith("{") || normalizedText.startsWith("[")
+          ? parseImportedDetection(JSON.parse(normalizedText) as unknown, regionConfig.detection).customPointsCm
+          : parseCustomRangeIni(text);
+        if (!canExportCustomRange(points)) {
+          throw new Error("自定义探测范围必须包含 3 到 150 个有效点");
+        }
+        next.detection = {
+          ...next.detection,
+          mode: "custom",
+          appliedMode: "custom",
+          customConfirmed: true,
+          customPointsCm: points,
         };
-        await persistRegionConfig(next, { fourSidedRange: next.detection.appliedMode === "rect" });
-        onMessage("探测范围配置已导入");
+        const saved = await persistRegionConfig(next, { customRange: true });
+        if (!saved) return;
+        setActivePanel("detection");
+        onMessage("自定义探测范围已导入并同步设备");
         return;
       }
-      const regions = parseImportedRegions(payload);
+      const normalizedText = text.replace(/^\uFEFF/, "").trimStart();
+      const regions = normalizedText.startsWith("{") || normalizedText.startsWith("[")
+        ? parseImportedRegions(JSON.parse(normalizedText) as unknown)
+        : parseRegionIni(text);
       const next = cloneConfig(regionConfig);
-      next.regions = regions;
-      await persistRegionConfig(next);
+      next.regions = mergeImportedRegions(regionConfig.regions, regions);
+      const saved = await persistRegionConfig(
+        next,
+        { regionMcuIo: true, tagConfig: true },
+        { requireApplied: ["regionMcuIo", "tagConfig"], refreshDetail: false },
+      );
+      if (!saved) return;
       clearRegionEditSession();
       setActivePanel("regions");
-      onMessage("标签区域配置已导入");
+      onMessage("标签区域配置已导入并同步设备");
     } catch (error) {
       onError(error instanceof Error ? error.message : "配置导入失败");
     }
@@ -593,17 +883,31 @@ export function RegionManagementPage({
       fileInputRef.current?.click();
       return;
     }
+    if ((action === "export-detection" || action === "export-regions") && readOnly) {
+      onError("该设备已离线，暂时无法导出配置，请等待设备恢复在线后重试");
+      return;
+    }
     if (action === "export-detection") {
-      downloadJson(
-        `device-${selectedDevice.deviceNo ?? selectedDevice.id}-detection-range.json`,
-        buildDetectionExportPayload(selectedDevice.deviceNo, regionConfig.detection),
+      if (regionConfig.detection.mode !== "custom") {
+        onError("当前范围模式不是自定义探测范围，无法导出");
+        return;
+      }
+      if (!canExportCustomRange(regionConfig.detection.customPointsCm)) {
+        onError("当前自定义探测范围点数据无效，至少需要 3 个有效点");
+        return;
+      }
+      downloadText(
+        `device-${selectedDevice.deviceNo ?? selectedDevice.id}-custom-detection-range.ini`,
+        serializeCustomRangeIni(regionConfig.detection.customPointsCm),
+        { includeUtf8Bom: true },
       );
       return;
     }
     if (action === "export-regions") {
-      downloadJson(
-        `device-${selectedDevice.deviceNo ?? selectedDevice.id}-tag-regions.json`,
-        buildRegionExportPayload(selectedDevice.deviceNo, regionConfig),
+      downloadText(
+        `device-${selectedDevice.deviceNo ?? selectedDevice.id}-tag-regions.ini`,
+        serializeRegionIni(regionConfig.regions),
+        { includeUtf8Bom: true },
       );
       return;
     }
@@ -646,13 +950,13 @@ export function RegionManagementPage({
   const currentCatalogItem = currentCatalogIndex >= 0 ? backgroundCatalog[currentCatalogIndex] : null;
   const visibleBackgroundCatalog = backgroundCatalog.filter((item) => {
     if (backgroundFilter === "all") return true;
-    if (backgroundFilter === "user") return item.kind === "imported";
-    return item.kind === "asset";
+    if (backgroundFilter === "user") return item.kind === "imported" || item.sourceType === "user";
+    return item.sourceType === "system";
   });
   const backgroundFilterOptions: Array<{ id: BackgroundCatalogFilter; label: string; count: number }> = [
     { id: "all", label: "全部", count: backgroundCatalog.length },
-    { id: "system", label: "官方", count: libraryAssets.length },
-    { id: "user", label: "已上传", count: importedBackgroundSources.length },
+    { id: "system", label: "系统", count: systemAssets.length },
+    { id: "user", label: "已上传", count: importedBackgroundSources.length + userAssets.length },
   ];
 
   const selectBackgroundSourceByKey = (key: string) => {
@@ -688,6 +992,10 @@ export function RegionManagementPage({
       visible: true,
       zIndex: next.backgroundInstances.length,
     });
+    next.viewPreferences = {
+      ...resolveViewPreferences(next),
+      backgroundVisible: true,
+    };
     const saved = await persistRegionConfig(next);
     if (saved) {
       setSelectedBackgroundId(instanceId);
@@ -1027,7 +1335,10 @@ export function RegionManagementPage({
         dragState.kind === "detection-resize" && Boolean(detectionBaselineRef.current);
       // Region/detection edits stay local until explicit Save/Apply.
       if (!editingRegionDrag && !editingDetectionDrag) {
-        void persistRegionConfig(configRef.current.regionConfig);
+        const apply = dragState.kind === "region" || dragState.kind === "region-resize"
+          ? { tagConfig: true }
+          : undefined;
+        void persistRegionConfig(configRef.current.regionConfig, apply);
       }
     }
     setDragState(null);
@@ -1074,8 +1385,8 @@ export function RegionManagementPage({
     const labelY = geometry.shape === "circle"
       ? ty(geometry.centerYCm + geometry.radiusCm) + 8
       : ty(geometry.centerYCm + geometry.heightCm / 2) + 8;
-    const nameWidth = Math.max(region.label.length * 12 + 10, 40);
-    const infoWidth = Math.max((label ?? "").length * 7.5 + 10, 36);
+    const nameWidth = Math.max(estimateChineseLabelWidth(displayRegion.label, 12, 12), 40);
+    const infoWidth = Math.max(estimateChineseLabelWidth(label ?? "", 11, 12), 36);
     return (
       <g key={region.id} data-region-id={region.id} className={selected ? "region-shape-group selected workspace-region" : "region-shape-group workspace-region"} opacity={displayRegion.visible ? 1 : 0.18}>
         {geometry.shape === "circle" ? (
@@ -1137,6 +1448,17 @@ export function RegionManagementPage({
   }
 
   const detection = regionConfig.detection;
+
+  const usedStatusIoIndexes = new Set(
+    regionConfig.regions
+      .filter((region) =>
+        region.id !== regionDraft?.id &&
+        region.enabled &&
+        region.regionType === "status_detection" &&
+        region.ioIndex !== 0,
+      )
+      .map((region) => region.ioIndex),
+  );
   const selectedBackground = regionConfig.backgroundInstances.find((instance) => instance.id === selectedBackgroundId);
   const scale = cellSize / 50;
   const tx = (value: number) => viewportOffset.x + value * scale;
@@ -1191,8 +1513,8 @@ export function RegionManagementPage({
             <button type="button" className="region-menu-btn" aria-label="更多操作" onClick={() => setMenuOpen((value) => !value)}>⋯</button>
             {menuOpen ? <div className="region-dropdown">
               <button type="button" disabled={readOnly} onClick={() => handleMenuAction("import-image")}>导入图片</button>
-              <button type="button" disabled={readOnly} onClick={() => handleMenuAction("import-detection")}>导入探测范围配置</button>
-              <button type="button" onClick={() => handleMenuAction("export-detection")}>导出探测范围配置</button>
+              <button type="button" disabled={readOnly} onClick={() => handleMenuAction("import-detection")}>导入自定义探测范围配置</button>
+              <button type="button" onClick={() => handleMenuAction("export-detection")}>导出自定义探测范围配置</button>
               <button type="button" disabled={readOnly} onClick={() => handleMenuAction("import-regions")}>导入标签区域配置</button>
               <button type="button" onClick={() => handleMenuAction("export-regions")}>导出标签区域配置</button>
             </div> : null}
@@ -1201,7 +1523,7 @@ export function RegionManagementPage({
               files.forEach((file) => importBackgroundFile(file));
               event.target.value = "";
             }} />
-            <input ref={configImportRef} className="region-bg-file-input" type="file" accept="application/json,.json" onChange={(event) => {
+            <input ref={configImportRef} className="region-bg-file-input" type="file" accept="text/plain,.ini,application/json,.json" onChange={(event) => {
               const file = event.target.files?.[0];
               if (file) void handleConfigImport(file);
               event.target.value = "";
@@ -1293,12 +1615,14 @@ export function RegionManagementPage({
               )) : null}
             </g>
           ) : null}
-          {visibleDetectionMode === "custom" && detection.customPointsCm.length >= 2 ? (
+          {visibleDetectionMode === "custom" && detection.customPointsCm.length >= 1 ? (
             <g className="region-detection-range-layer">
               {detection.customPointsCm.length >= 3 ? (
                 <polygon className="range-custom-polygon workspace-detection-range custom" points={detection.customPointsCm.map((point) => `${tx(point.x)},${ty(point.y)}`).join(" ")} />
               ) : null}
-              <polyline className="range-custom-line" fill="none" points={detection.customPointsCm.map((point) => `${tx(point.x)},${ty(point.y)}`).join(" ")} />
+              {detection.customPointsCm.length >= 2 ? (
+                <polyline className="range-custom-line" fill="none" points={detection.customPointsCm.map((point) => `${tx(point.x)},${ty(point.y)}`).join(" ")} />
+              ) : null}
               {detection.customPointsCm.map((point, index) => (
                 <g className="range-custom-vertex" key={`custom-v-${index}`}>
                   <circle cx={tx(point.x)} cy={ty(point.y)} r="7" />
@@ -1316,12 +1640,23 @@ export function RegionManagementPage({
             </g>
           ) : null}
           {regionConfig.regions.map(renderRegionShape)}
+          {(detail?.targets ?? []).map((target) => {
+            const radius = Math.max(5, Math.min(10, cellSize * 0.12));
+            const x = tx(target.x * 100);
+            const y = ty(target.y * 100);
+            return (
+              <g className={`target-point target-point-${target.feature}`} key={`${target.id}-${target.x}-${target.y}`} data-target-id={target.id}>
+                <circle cx={x} cy={y} r={radius} />
+                <circle className="target-halo" cx={x} cy={y} r={radius * 2} />
+              </g>
+            );
+          })}
         </svg>
 
         <div className="region-toolbar">
           <div className="region-toolbar-group">
-            <button className={gridVisible ? "region-tool-btn active" : "region-tool-btn"} type="button" onClick={() => setGridVisible((value) => !value)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 8h16M4 16h16M8 4v16M16 4v16" /></svg><span>网格</span></button>
-            <button className={backgroundVisible ? "region-tool-btn active" : "region-tool-btn"} type="button" onClick={() => setBackgroundVisible((value) => !value)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="4" y="5" width="16" height="14" rx="2" /><circle cx="9" cy="10" r="1.5" fill="currentColor" stroke="none" /><path d="m5 17 4-4 3 3 4-5 3 4" /></svg><span>底图</span></button>
+            <button className={gridVisible ? "region-tool-btn active" : "region-tool-btn"} type="button" onClick={() => applyViewPreferences({ gridVisible: !gridVisible })}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 8h16M4 16h16M8 4v16M16 4v16" /></svg><span>网格</span></button>
+            <button className={backgroundVisible ? "region-tool-btn active" : "region-tool-btn"} type="button" onClick={() => applyViewPreferences({ backgroundVisible: !backgroundVisible })}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="4" y="5" width="16" height="14" rx="2" /><circle cx="9" cy="10" r="1.5" fill="currentColor" stroke="none" /><path d="m5 17 4-4 3 3 4-5 3 4" /></svg><span>底图</span></button>
             <button className="region-tool-btn" type="button" onClick={() => { setCellSize(BASE_CELL); setViewportOffset({ x: canvasSize.width / 2, y: canvasSize.height / 2 }); }}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 12a9 9 0 1 0 3-6.7" /><path d="M3 4v5h5M12 8v4l3 2" /></svg><span>复位</span></button>
           </div>
           <div className="region-toolbar-group">
@@ -1341,8 +1676,23 @@ export function RegionManagementPage({
         >
         {activePanel ? <aside className={`region-float-panel region-${activePanel}-panel`}>
           {activePanel === "regions" ? <>
-            <div className="region-panel-head"><h3>区域列表</h3><button type="button" className="region-add-btn" onClick={addRegion} disabled={readOnly || regionConfig.regions.length >= 32}>+ 新增</button></div>
+            <div className="region-panel-head">
+              <h3>区域列表</h3>
+              <div className="region-panel-head-actions">
+                <button type="button" className="region-sync-btn" onClick={() => void syncAllRegions()} disabled={readOnly || saving}>同步</button>
+                <button type="button" className="region-add-btn" onClick={addRegion} disabled={readOnly || regionConfig.regions.length >= 32}>+ 新增</button>
+              </div>
+            </div>
             <div className="region-list-body">
+              <div className={selectedRegionId === OVERALL_REGION_ID ? "region-list-item active" : "region-list-item"} onClick={selectOverallRegion}>
+                <i className="region-color-dot" style={{ background: "#2F7EF7" }} />
+                <div className="region-list-meta">
+                  <strong>整体区域</strong>
+                </div>
+                <div className="region-list-actions">
+                  <button type="button" className="region-icon-btn" disabled={readOnly} aria-label="配置整体区域 MCU侧IO" onClick={(event) => { event.stopPropagation(); selectOverallRegion(); }}>✎</button>
+                </div>
+              </div>
               {regionConfig.regions.length ? [...regionConfig.regions].sort((a, b) => a.index - b.index).map((region) => {
                   const displayRegion = regionDraft?.id === region.id ? regionDraft : region;
                   return (
@@ -1362,9 +1712,17 @@ export function RegionManagementPage({
                       </div>
                     </div>
                   );
-                }) : <div className="region-panel-empty">暂无区域，点击“新增”开始配置。</div>}
+                }) : <div className="region-panel-empty">暂无标签区域，点击“新增”开始配置。</div>}
             </div>
-            <div className="region-panel-foot"><span>总计: <strong>{regionConfig.regions.length}</strong> 个区域</span></div>
+            <div className="region-panel-foot"><span>总计: <strong>{regionConfig.regions.length + 1}</strong> 个区域（含整体区域）</span></div>
+          </> : null}
+
+          {activePanel === "edit" && overallMcuIoDraft !== null ? <>
+            <div className="region-panel-head"><h3>整体区域配置</h3><button type="button" onClick={() => { clearRegionEditSession(); setActivePanel("regions"); }}>关闭</button></div>
+            <div className="region-form-grid">
+              <label className="region-form-full"><span>MCU侧IO（传感器 IO1）</span><select disabled={readOnly || saving} value={overallMcuIoDraft} onChange={(event) => setOverallMcuIoDraft(Number(event.target.value))}>{MCU_IO_OPTIONS.map((value) => <option value={value} key={value}>{value < 0 ? "无" : value}</option>)}</select></label>
+            </div>
+            <div className="region-panel-actions"><button type="button" className="primary-button" disabled={readOnly || saving} onClick={() => void saveOverallRegion()}>保存并同步</button><button type="button" className="ghost-button" onClick={() => { clearRegionEditSession(); setActivePanel("regions"); }}>取消</button></div>
           </> : null}
 
           {activePanel === "edit" && regionDraft ? <>
@@ -1373,11 +1731,7 @@ export function RegionManagementPage({
               <label><span>区域名称</span><input disabled={readOnly} value={regionDraft.label} onChange={(event) => updateRegionDraft({ ...regionDraft, label: event.target.value })} /></label>
               <label><span>区域索引</span><input disabled={readOnly} type="number" min="0" max="31" value={regionDraft.index} onChange={(event) => {
                 const index = Math.max(0, Math.min(31, Number(event.target.value)));
-                updateRegionDraft({
-                  ...regionDraft,
-                  index,
-                  mcuIo: regionDraft.regionType === "status_detection" && index < 6 ? regionDraft.mcuIo : -1,
-                });
+                updateRegionDraft({ ...regionDraft, index });
               }} /></label>
               <label><span>区域类型</span><select disabled={readOnly} value={regionDraft.regionType} onChange={(event) => {
                 const regionType = event.target.value as RegionType;
@@ -1385,7 +1739,7 @@ export function RegionManagementPage({
                   ...regionDraft,
                   regionType,
                   ioIndex: regionType === "status_detection" ? regionDraft.ioIndex : 0,
-                  mcuIo: regionType === "status_detection" && regionDraft.index < 6 ? regionDraft.mcuIo : -1,
+                  mcuIo: regionType === "status_detection" && regionDraft.ioIndex !== 0 ? regionDraft.mcuIo : -1,
                 });
               }}>{Object.entries(REGION_LABELS).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
               <label><span>范围类型</span><select disabled={readOnly} value={regionDraft.geometry.shape} onChange={(event) => {
@@ -1408,8 +1762,11 @@ export function RegionManagementPage({
                     };
                 updateRegionDraft({ ...regionDraft, geometry });
               }}><option value="rect">矩形</option><option value="circle">圆形</option></select></label>
-              <label className={regionDraft.regionType === "status_detection" ? undefined : "disabled-field"}><span>IO 索引</span><select disabled={readOnly || regionDraft.regionType !== "status_detection"} value={regionDraft.ioIndex} onChange={(event) => updateRegionDraft({ ...regionDraft, ioIndex: Number(event.target.value) as RegionDefinition["ioIndex"] })}>{[0, 2, 3, 4, 5, 6].map((value) => <option value={value} key={value}>{value === 0 ? "无" : value}</option>)}</select></label>
-              <label className={regionDraft.regionType === "status_detection" && regionDraft.index < 6 ? undefined : "disabled-field"}><span>MCU侧IO</span><select disabled={readOnly || regionDraft.regionType !== "status_detection" || regionDraft.index > 5} value={regionDraft.mcuIo} onChange={(event) => updateRegionDraft({ ...regionDraft, mcuIo: Number(event.target.value) })}>{MCU_IO_OPTIONS.map((value) => <option value={value} key={value}>{value < 0 ? "无" : value}</option>)}</select></label>
+              <label className={regionDraft.regionType === "status_detection" ? undefined : "disabled-field"}><span>IO 索引</span><select disabled={readOnly || regionDraft.regionType !== "status_detection"} value={regionDraft.ioIndex} onChange={(event) => {
+                const ioIndex = Number(event.target.value) as RegionDefinition["ioIndex"];
+                updateRegionDraft({ ...regionDraft, ioIndex, mcuIo: ioIndex === 0 ? -1 : regionDraft.mcuIo });
+              }}>{[0, 2, 3, 4, 5, 6].map((value) => <option value={value} key={value} disabled={value !== 0 && usedStatusIoIndexes.has(value as RegionDefinition["ioIndex"])}>{value === 0 ? "无" : `IO${value}`}</option>)}</select></label>
+              <label className={regionDraft.regionType === "status_detection" && regionDraft.ioIndex !== 0 ? undefined : "disabled-field"}><span>MCU侧IO</span><select disabled={readOnly || regionDraft.regionType !== "status_detection" || regionDraft.ioIndex === 0} value={regionDraft.mcuIo} onChange={(event) => updateRegionDraft({ ...regionDraft, mcuIo: Number(event.target.value) })}>{MCU_IO_OPTIONS.map((value) => <option value={value} key={value}>{value < 0 ? "无" : value}</option>)}</select></label>
               <label><span>中心 X (cm)</span><input disabled={readOnly} type="number" value={regionDraft.geometry.centerXCm} onChange={(event) => updateRegionDraft({ ...regionDraft, geometry: updateGeometryCenter(regionDraft.geometry, Number(event.target.value), regionDraft.geometry.centerYCm) })} /></label>
               <label><span>中心 Y (cm)</span><input disabled={readOnly} type="number" value={regionDraft.geometry.centerYCm} onChange={(event) => updateRegionDraft({ ...regionDraft, geometry: updateGeometryCenter(regionDraft.geometry, regionDraft.geometry.centerXCm, Number(event.target.value)) })} /></label>
               {regionDraft.geometry.shape === "rect" ? <>
@@ -1421,15 +1778,21 @@ export function RegionManagementPage({
           </> : null}
 
           {activePanel === "parameters" ? <>
-            <div className="region-panel-head"><div><h3>参数配置</h3><span>{readOnly ? "离线缓存，只读" : "HA Native Entity"}</span></div></div>
+            <div className="region-panel-head">
+              <div>
+                <h3>参数配置</h3>
+                {readOnly ? <span>离线缓存，只读</span> : null}
+              </div>
+              <button type="button" disabled={readOnly || saving} onClick={() => void syncSettings()}>同步</button>
+            </div>
             <section className="parameter-section">
               <h4>指示灯设置</h4>
               {([
-                ["trajectoryLed", "轨迹指示灯", "开启后显示轨迹相关指示状态。"],
-                ["motionLed", "运动状态指示灯", "开启后显示运动/静止状态指示。"],
-              ] as const).map(([key, title, description]) => (
+                ["trajectoryLed", "轨迹指示灯"],
+                ["motionLed", "运动状态指示灯"],
+              ] as const).map(([key, title]) => (
                 <div className="region-range-switch-row" key={key}>
-                  <div><strong>{title}</strong><span>{description}</span></div>
+                  <div><strong>{title}</strong></div>
                   <button
                     type="button"
                     className={deviceConfig?.deviceSettings[key] ? "region-range-switch on" : "region-range-switch"}
@@ -1440,8 +1803,10 @@ export function RegionManagementPage({
                 </div>
               ))}
             </section>
-            <section className="parameter-section"><h4>上报与轨迹参数</h4><div className="region-form-grid">{parameterFields.map((field) => <label key={field.key}><span>{field.label}</span><input disabled={readOnly || saving} type="number" min={field.min} max={field.max} defaultValue={deviceConfig?.deviceSettings[field.key] ?? PARAM_DEFAULTS[field.key]} onBlur={(event) => void updateSettings({ [field.key]: Math.max(field.min, Math.min(field.max, Number(event.target.value))) })} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} /></label>)}</div></section>
-            <button type="button" className="primary-button full-button" disabled={readOnly || saving} onClick={() => void updateSettings(PARAM_DEFAULTS)}>恢复默认参数设置</button>
+            <section className="parameter-section"><h4>上报与轨迹参数</h4><div className="region-form-grid">{parameterFields.map((field) => <label key={`${selectedDevice.id}-${field.key}-${deviceConfig?.deviceSettings[field.key] ?? PARAM_DEFAULTS[field.key]}`}><span>{field.label}</span><input disabled={readOnly || saving} type="number" min={field.min} max={field.max} defaultValue={deviceConfig?.deviceSettings[field.key] ?? PARAM_DEFAULTS[field.key]} onBlur={(event) => void updateSettings({ [field.key]: Math.max(field.min, Math.min(field.max, Number(event.target.value))) })} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} /></label>)}</div></section>
+            <div className="region-param-footer">
+              <button type="button" className="primary-button region-reset-params-btn" disabled={readOnly || saving} onClick={() => void updateSettings(PARAM_DEFAULTS)}>恢复默认参数设置</button>
+            </div>
           </> : null}
 
           {activePanel === "background" ? <>
@@ -1449,7 +1814,6 @@ export function RegionManagementPage({
             <section className="region-param-section background-library-section">
               <div className="region-param-section-title">
                 <h4>素材库</h4>
-                <p>参考家具库方式：单击选中，双击添加；滚轮上下浏览。</p>
               </div>
               {backgroundCatalog.length ? (
                 <>
@@ -1470,23 +1834,51 @@ export function RegionManagementPage({
                   <div className="bg-material-grid" ref={baseMapLibraryRef}>
                     {visibleBackgroundCatalog.length ? visibleBackgroundCatalog.map((item) => {
                       const selected = item.key === selectedBackgroundKey;
+                      const isImported = item.kind === "imported";
+                      const isUploadedAsset = item.sourceType === "user";
                       return (
-                        <button
-                          type="button"
+                        <div
                           key={item.key}
                           className={selected ? "bg-material-card active" : "bg-material-card"}
                           title={item.name}
+                          role="button"
+                          tabIndex={0}
                           aria-pressed={selected}
                           onClick={() => selectBackgroundSourceByKey(item.key)}
                           onDoubleClick={() => void placeBackgroundItem(item)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter" || event.key === " ") {
+                              event.preventDefault();
+                              selectBackgroundSourceByKey(item.key);
+                            }
+                          }}
                         >
                           <span className="bg-material-thumb">
                             <img src={item.url} alt="" draggable={false} />
                           </span>
+                          {isImported || isUploadedAsset ? (
+                            <button
+                              type="button"
+                              className="bg-material-delete"
+                              title="删除已上传图片"
+                              aria-label={`删除 ${item.name}`}
+                              onClick={(event) => {
+                                event.preventDefault();
+                                event.stopPropagation();
+                                if (isImported) {
+                                  void removeImportedBackgroundSource(item.id);
+                                } else {
+                                  void removeUserBaseMapAsset(item.id);
+                                }
+                              }}
+                            >
+                              ×
+                            </button>
+                          ) : null}
                           <span className="bg-material-card-meta">
                             <strong>{item.name.replace(/\.[^.]+$/, "")}</strong>
                           </span>
-                        </button>
+                        </div>
                       );
                     }) : (
                       <p className="region-bg-empty">该分类暂无素材。</p>
@@ -1511,7 +1903,7 @@ export function RegionManagementPage({
           </> : null}
 
           {activePanel === "detection" ? <>
-            <div className="region-panel-head"><div><h3>探测范围</h3><span>当前 {detection.appliedMode ?? "未设置"}</span></div></div>
+            <div className="region-panel-head"><div><h3>探测范围</h3></div></div>
             <p className="region-range-hint">{getDetectionHint(detection)}</p>
             <div className="detection-mode-tabs">{(["rect", "learned", "custom"] as const).map((mode) => <button type="button" key={mode} className={detection.mode === mode ? "active" : ""} disabled={readOnly && mode !== detection.mode} onClick={() => {
               const next = cloneConfig(regionConfig);
@@ -1524,13 +1916,16 @@ export function RegionManagementPage({
               setCurrentConfig({ ...deviceConfig!, regionConfig: next });
               setDirty(true);
             }}>{mode === "rect" ? "四方探测范围" : mode === "learned" ? "学习探测范围" : "自定义范围"}</button>)}</div>
-            {detection.mode === "rect" ? <><div className="region-form-grid">{(["xMin", "xMax", "yMin", "yMax"] as const).map((key) => <label key={key}><span>{key} (cm)</span><input disabled={readOnly} type="number" value={detection.rectCm[key]} onChange={(event) => {
+            {detection.mode === "rect" ? <>
+              <div className="region-form-grid">{(["xMin", "xMax", "yMin", "yMax"] as const).map((key) => <label key={key}><span>{key} (cm)</span><input disabled={readOnly} type="number" value={detection.rectCm[key]} onChange={(event) => {
               const next = cloneConfig(regionConfig);
               next.detection.rectCm[key] = Number(event.target.value);
               next.rangeBox = { xMin: next.detection.rectCm.xMin / 100, xMax: next.detection.rectCm.xMax / 100, yMin: next.detection.rectCm.yMin / 100, yMax: next.detection.rectCm.yMax / 100 };
               setCurrentConfig({ ...deviceConfig!, regionConfig: next });
               setDirty(true);
-            }} /></label>)}</div><button type="button" className="primary-button full-button" disabled={readOnly || saving} onClick={() => {
+            }} /></label>)}</div>
+              <div className="region-detection-footer">
+                <button type="button" className="primary-button region-detection-action-btn" disabled={readOnly || saving} onClick={() => {
               void (async () => {
                 const next = cloneConfig(regionConfig);
                 next.detection.mode = "rect";
@@ -1544,14 +1939,16 @@ export function RegionManagementPage({
                 const saved = await persistRegionConfig(next, { fourSidedRange: true });
                 if (saved) refreshDetectionBaseline();
               })();
-            }}>设置并同步设备</button></> : null}
+            }}>设置并同步设备</button>
+              </div>
+            </> : null}
             {detection.mode === "learned" ? <>
               <div className="region-range-switch-row">
-                <div><strong>学习探测范围</strong><span>设备学习接口接入后，可在此启用轨迹学习范围并同步到设备。</span></div>
+                <div><strong>开始学习探测范围</strong></div>
                 <button type="button" className={detection.learnedPointsCm.length ? "region-range-switch on" : "region-range-switch"} disabled={readOnly} aria-pressed={detection.learnedPointsCm.length ? "true" : "false"}><span /></button>
               </div>
-              <p className="region-help">已学习 {detection.learnedPointsCm.length} 个点。学习接口暂未完全接入时，可先导入 JSON 配置预览范围。</p>
-              <button type="button" className="primary-button full-button" disabled={readOnly || saving || detection.learnedPointsCm.length < 3} onClick={() => {
+              <div className="region-detection-footer">
+              <button type="button" className="primary-button region-detection-action-btn" disabled={readOnly || saving || detection.learnedPointsCm.length < 3} onClick={() => {
                 void (async () => {
                   const next = cloneConfig(regionConfig);
                   next.detection.mode = "learned";
@@ -1560,17 +1957,18 @@ export function RegionManagementPage({
                   if (saved) refreshDetectionBaseline();
                 })();
               }}>设置并本地应用</button>
+              </div>
             </> : null}
-            {detection.mode === "custom" ? <><div className="custom-range-status">{getDetectionHint(detection)}</div><div className="region-panel-actions"><button type="button" disabled={readOnly || detection.customPointsCm.length === 0} onClick={() => { const next = cloneConfig(regionConfig); next.detection.customPointsCm.pop(); setCurrentConfig({ ...deviceConfig!, regionConfig: next }); setDirty(true); }}>撤销</button><button type="button" disabled={readOnly || detection.customPointsCm.length === 0} onClick={() => { const next = cloneConfig(regionConfig); next.detection.customPointsCm = []; next.detection.customConfirmed = false; setCurrentConfig({ ...deviceConfig!, regionConfig: next }); setDirty(true); }}>清除</button><button type="button" className="primary-button" disabled={readOnly || !canConfirmCustomRange(detection.customPointsCm)} onClick={() => {
+            {detection.mode === "custom" ? <><div className="custom-range-status">{getDetectionHint(detection)}</div><div className="region-panel-actions"><button type="button" disabled={readOnly || detection.customPointsCm.length === 0} onClick={() => { const next = cloneConfig(regionConfig); next.detection.customPointsCm.pop(); setCurrentConfig({ ...deviceConfig!, regionConfig: next }); setDirty(true); }}>撤销</button><button type="button" disabled={readOnly || detection.customPointsCm.length === 0} onClick={() => { const next = cloneConfig(regionConfig); next.detection.customPointsCm = []; next.detection.customConfirmed = false; setCurrentConfig({ ...deviceConfig!, regionConfig: next }); setDirty(true); }}>清除</button><button type="button" className="primary-button" disabled={readOnly || saving || !canConfirmCustomRange(detection.customPointsCm)} onClick={() => {
               void (async () => {
                 const next = cloneConfig(regionConfig);
                 next.detection.mode = "custom";
                 next.detection.customConfirmed = true;
                 next.detection.appliedMode = "custom";
-                const saved = await persistRegionConfig(next);
+                const saved = await persistRegionConfig(next, { customRange: true });
                 if (saved) refreshDetectionBaseline();
               })();
-            }}>确认并本地应用</button></div><p className="local-only-note">确认后保存到当前生效探测范围；未应用前关闭面板将还原上一次范围。</p></> : null}
+            }}>确认并同步设备</button></div></> : null}
           </> : null}
         </aside> : null}
         </div>

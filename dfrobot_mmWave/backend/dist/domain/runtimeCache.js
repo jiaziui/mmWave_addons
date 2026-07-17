@@ -26,7 +26,9 @@ class RuntimeCacheStore {
                 identity: {},
                 discovery: createDefaultDiscovery(now),
                 native: {},
-                mqtt: {},
+                mqtt: {
+                    tagRegions: new Map(),
+                },
                 updatedAt: now,
             },
         };
@@ -67,17 +69,51 @@ class RuntimeCacheStore {
     updateTrajectory(deviceId, trajectory) {
         const current = this.devices.get(deviceId);
         if (!current) {
-            return;
+            return false;
+        }
+        const previousCount = current.state.mqtt.lastEmittedTargetCount;
+        const targetCount = trajectory.targetCount;
+        if (targetCount === 0 && previousCount === 0) {
+            return false;
         }
         current.state.mqtt = {
             ...current.state.mqtt,
             trajectory,
+            lastEmittedTargetCount: targetCount,
+            lastEmittedAt: trajectory.updatedAt,
             updatedAt: trajectory.updatedAt,
         };
         current.state.updatedAt = new Date().toISOString();
+        return true;
+    }
+    updateTagRegion(deviceId, event) {
+        const current = this.devices.get(deviceId);
+        if (!current) {
+            return false;
+        }
+        current.state.mqtt.tagRegions.set(event.tagIndex, {
+            tagIndex: event.tagIndex,
+            tagType: event.tagType,
+            tagTypeCode: event.tagTypeCode,
+            ioIndex: event.ioIndex,
+            centerXCm: event.centerXCm,
+            centerYCm: event.centerYCm,
+            movingCount: event.movingCount,
+            staticCount: event.staticCount,
+            boundaryState: event.boundaryState,
+            approachAwayState: event.approachAwayState,
+            receivedAt: event.receivedAt,
+            dataAvailable: true,
+        });
+        current.state.mqtt.updatedAt = event.receivedAt;
+        current.state.updatedAt = event.receivedAt;
+        return true;
     }
     getTrajectory(deviceId) {
         return this.devices.get(deviceId)?.state.mqtt.trajectory ?? null;
+    }
+    getTagRegions(deviceId) {
+        return this.devices.get(deviceId)?.state.mqtt.tagRegions ?? new Map();
     }
     hydrateDevice(device) {
         const cache = this.devices.get(device.id)?.state;

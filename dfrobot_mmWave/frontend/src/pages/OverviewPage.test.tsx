@@ -27,6 +27,9 @@ const device: MmwaveOverviewDeviceCard = {
   },
   regions: [],
   targets: [],
+  backgroundInstances: [],
+  viewPreferences: { gridVisible: true, backgroundVisible: false },
+  deploymentName: "厨房",
 };
 
 describe("OverviewPage", () => {
@@ -42,6 +45,7 @@ describe("OverviewPage", () => {
     />);
 
     expect(screen.getByText("厨房雷达")).toBeInTheDocument();
+    expect(screen.getByText("厨房")).toBeInTheDocument();
     expect(container.querySelectorAll(".target-point")).toHaveLength(0);
     expect(screen.getByText("总人数 2")).toBeInTheDocument();
     expect(screen.getByText("数据可能已过期")).toBeInTheDocument();

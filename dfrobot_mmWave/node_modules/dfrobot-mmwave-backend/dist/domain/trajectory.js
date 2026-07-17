@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.parseTrajectorySnapshot = exports.parseTargetTrajectoryHex = void 0;
+exports.parseTrajectorySnapshot = exports.parseTargetTrajectoryHex = exports.toDisplayTrajectoryPoints = void 0;
 const normalizeHex = (value) => value.replace(/\s+/g, "").toUpperCase();
 const parseSignedBitInt16 = (high, low) => {
     const raw = (high << 8) | low;
@@ -8,6 +8,11 @@ const parseSignedBitInt16 = (high, low) => {
     const magnitude = raw & 0x7fff;
     return negative ? -magnitude : magnitude;
 };
+const toDisplayTrajectoryPoints = (points) => points.map((point) => ({
+    ...point,
+    x: -point.x,
+}));
+exports.toDisplayTrajectoryPoints = toDisplayTrajectoryPoints;
 const parseTargetTrajectoryHex = (hex) => {
     const normalized = normalizeHex(hex);
     if (normalized.length < 2 || normalized.length % 2 !== 0) {
@@ -43,12 +48,14 @@ const parseTrajectorySnapshot = (topic, payload) => {
             return null;
         }
         const hex = normalizeHex(parsed.hex);
+        const points = (0, exports.parseTargetTrajectoryHex)(hex);
+        const parsedTargetCount = typeof parsed.target_count === "number" ? parsed.target_count : undefined;
         return {
             topic,
             topicPrefix: typeof parsed.device_topic_prefix === "string" ? parsed.device_topic_prefix : "",
             mqttKey: typeof parsed.mqtt_key === "string" ? parsed.mqtt_key : "main",
-            targetCount: typeof parsed.target_count === "number" ? parsed.target_count : 0,
-            points: (0, exports.parseTargetTrajectoryHex)(hex),
+            targetCount: Math.max(parsedTargetCount ?? 0, points.length),
+            points,
             hex,
             updatedAt: new Date().toISOString(),
         };

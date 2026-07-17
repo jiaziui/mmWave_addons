@@ -16,6 +16,18 @@ export interface ProfileCapabilities {
 export interface ProfileMqttTopics {
   component: string;
   trajectoryStateTopic?: string;
+  tagEventStateTopic?: string;
+  multiTagConfigStateTopic?: string;
+  multiTagConfigCommandTopic?: string;
+  multiTagConfigResultTopic?: string;
+  configFileRangeStateTopic?: string;
+  configFileRangeCommandTopic?: string;
+  configFileRangeResultTopic?: string;
+  learnedTrajectoryRangeStateTopic?: string;
+  learnedTrajectoryRangeSetCommandTopic?: string;
+  learnedTrajectoryRangeSetResultTopic?: string;
+  learnedTrajectoryRangeQueryCommandTopic?: string;
+  learnedTrajectoryRangeQueryResultTopic?: string;
 }
 
 export const isMmwaveProfileId = (value: unknown): value is MmwaveProfileId =>

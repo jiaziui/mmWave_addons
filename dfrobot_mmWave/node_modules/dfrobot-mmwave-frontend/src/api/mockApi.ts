@@ -1,6 +1,9 @@
 import type {
   ConfigApplyResult,
   DetectionMode,
+  DeviceLogCalendar,
+  DeviceLogEntry,
+  DeviceLogPage,
   MetaConfig,
   MmwaveDeviceConfig,
   MmwaveDeviceDetail,
@@ -87,7 +90,8 @@ const createRegionConfig = (variant: "kitchen" | "living" | "study"): StoredRegi
         },
       ],
       backgroundInstances: [],
-      syncState: { fourSidedRange: "synced", regionMcuIo: "synced", updatedAt: now },
+      viewPreferences: { gridVisible: true, backgroundVisible: false },
+      syncState: { fourSidedRange: "synced", regionMcuIo: "synced", tagConfig: "synced", customRange: "local_only", updatedAt: now },
     };
   }
 
@@ -158,7 +162,8 @@ const createRegionConfig = (variant: "kitchen" | "living" | "study"): StoredRegi
           zIndex: 0,
         },
       ],
-      syncState: { fourSidedRange: "local_only", regionMcuIo: "synced", updatedAt: now },
+      viewPreferences: { gridVisible: true, backgroundVisible: true },
+      syncState: { fourSidedRange: "local_only", regionMcuIo: "synced", tagConfig: "synced", customRange: "local_only", updatedAt: now },
     };
   }
 
@@ -190,7 +195,8 @@ const createRegionConfig = (variant: "kitchen" | "living" | "study"): StoredRegi
       },
     ],
     backgroundInstances: [],
-    syncState: { fourSidedRange: "pending", regionMcuIo: "pending", updatedAt: now },
+    viewPreferences: { gridVisible: true, backgroundVisible: false },
+    syncState: { fourSidedRange: "pending", regionMcuIo: "pending", tagConfig: "pending", customRange: "synced", updatedAt: now },
   };
 };
 
@@ -401,7 +407,7 @@ const overviewCard = (device: StoredMmwaveDevice, tick: number): MmwaveOverviewD
   const staticCount = targets.filter((target) => target.feature === "static").length;
   return {
     id: device.id,
-    name: device.deploymentName?.trim() || device.name,
+    name: device.name,
     model: device.model,
     online,
     status: online ? "ONLINE" : "OFFLINE",
@@ -416,6 +422,12 @@ const overviewCard = (device: StoredMmwaveDevice, tick: number): MmwaveOverviewD
     detection: regionConfigs[device.id].detection,
     regions: overlayRegions(device.id, tick),
     targets,
+    backgroundInstances: regionConfigs[device.id].backgroundInstances,
+    viewPreferences: regionConfigs[device.id].viewPreferences ?? {
+      gridVisible: true,
+      backgroundVisible: regionConfigs[device.id].backgroundInstances.some((instance) => instance.visible),
+    },
+    deploymentName: device.deploymentName,
   };
 };
 
@@ -431,6 +443,11 @@ const configFor = (device: StoredMmwaveDevice): MmwaveDeviceConfig => ({
   detectionMode: device.detectionMode,
   regionConfig: regionConfigs[device.id],
   deviceSettings: device.deviceSettings ?? {},
+  logRetention: device.logRetention ?? {
+    mode: "forever",
+    updatedAt: new Date(0).toISOString(),
+  },
+  nextCleanupAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
 });
 
 const nextTick = () => {
@@ -493,13 +510,8 @@ export const mockFetchDetail = async (deviceId: string): Promise<{ ok: boolean; 
           value: `${(devices[index].installInfo?.installHeightM ?? 1.8).toFixed(2)} m`,
         },
         {
-          key: "detectionMode",
-          label: "探测模式",
-          value: devices[index].detectionMode === 1 ? "高灵敏度" : "静态稳定",
-        },
-        {
-          key: "rangeMode",
-          label: "范围模式",
+          key: "detectionRangeMode",
+          label: "探测范围",
           value:
             regionConfigs[deviceId].detection.appliedMode === "learned"
               ? "学习探测范围"
@@ -513,6 +525,85 @@ export const mockFetchDetail = async (deviceId: string): Promise<{ ok: boolean; 
   };
 };
 
+const mockDeviceLogs = (deviceId: string): DeviceLogEntry[] => {
+  const device = devices.find((entry) => entry.id === deviceId);
+  const identity = {
+    deviceName: device?.name ?? "c4004",
+    deploymentName: device?.deploymentName ?? "",
+  };
+  return [
+  {
+    ...identity,
+    occurredAt: "2026-07-14T03:23:00.000Z",
+    localDate: "2026-07-14",
+    regionIndex: 0,
+    regionLabel: "办公区",
+    regionType: "status_detection",
+    eventType: "status_changed",
+    movingCount: 1,
+    staticCount: 2,
+    totalCount: 3,
+    message: "1号办公区当前运动人数为1人，静止人数为2人，总人数为3人",
+  },
+  {
+    ...identity,
+    occurredAt: "2026-07-14T03:20:00.000Z",
+    localDate: "2026-07-14",
+    regionIndex: 1,
+    regionLabel: "卧室",
+    regionType: "approach_depart",
+    eventType: "approach",
+    message: "2号卧室区域有人靠近",
+  },
+  {
+    ...identity,
+    occurredAt: "2026-07-14T03:18:00.000Z",
+    localDate: "2026-07-14",
+    regionIndex: 2,
+    regionLabel: "卧室门",
+    regionType: "boundary",
+    eventType: "enter",
+    message: "3号卧室门区域有人进入",
+  },
+  ];
+};
+
+export const mockFetchDeviceLogCalendar = async (
+  deviceId: string,
+  year: number,
+  month: number,
+): Promise<{ ok: boolean } & DeviceLogCalendar> => {
+  if (!devices.some((device) => device.id === deviceId)) throw new Error("Mock device not found");
+  return {
+    ok: true,
+    year,
+    month,
+    years: [2026],
+    months: year === 2026 ? [7] : [],
+    days: year === 2026 && month === 7 ? [14] : [],
+  };
+};
+
+export const mockFetchDeviceLogs = async (
+  deviceId: string,
+  date: string,
+  page: number,
+  pageSize: number,
+): Promise<{ ok: boolean } & DeviceLogPage> => {
+  if (!devices.some((device) => device.id === deviceId)) throw new Error("Mock device not found");
+  const logs = mockDeviceLogs(deviceId).filter((entry) => entry.localDate === date);
+  const offset = (page - 1) * pageSize;
+  return {
+    ok: true,
+    date,
+    page,
+    pageSize,
+    total: logs.length,
+    hasMore: offset + pageSize < logs.length,
+    logs: logs.slice(offset, offset + pageSize),
+  };
+};
+
 export const mockFetchConfig = async (deviceId: string) => {
   const device = devices.find((entry) => entry.id === deviceId);
   if (!device) throw new Error("Mock device not found");
@@ -521,7 +612,12 @@ export const mockFetchConfig = async (deviceId: string) => {
 
 export const mockUpdateConfig = async (
   deviceId: string,
-  payload: { deviceSettings?: MmwaveDeviceConfig["deviceSettings"]; regionConfig?: StoredRegionConfig },
+  payload: {
+    deviceSettings?: MmwaveDeviceConfig["deviceSettings"];
+    regionConfig?: StoredRegionConfig;
+    logRetention?: Omit<MmwaveDeviceConfig["logRetention"], "updatedAt">;
+    apply?: { fourSidedRange?: boolean; regionMcuIo?: boolean; tagConfig?: boolean; customRange?: boolean };
+  },
 ): Promise<{ ok: boolean; config: MmwaveDeviceConfig; applyResult: ConfigApplyResult }> => {
   const device = devices.find((entry) => entry.id === deviceId);
   if (!device) throw new Error("Mock device not found");
@@ -535,10 +631,22 @@ export const mockUpdateConfig = async (
   if (payload.deviceSettings) {
     device.deviceSettings = { ...device.deviceSettings, ...payload.deviceSettings };
   }
+  if (payload.logRetention) {
+    device.logRetention = {
+      ...payload.logRetention,
+      updatedAt: new Date().toISOString(),
+    };
+  }
   return {
     ok: true,
     config: structuredClone(configFor(device)),
-    applyResult: { fourSidedRange: "applied", regionMcuIo: "applied", warnings: [] },
+    applyResult: {
+      fourSidedRange: payload.apply?.fourSidedRange ? "applied" : "skipped",
+      regionMcuIo: payload.apply?.regionMcuIo ? "applied" : "skipped",
+      tagConfig: payload.apply?.tagConfig ? "applied" : "skipped",
+      customRange: payload.apply?.customRange ? "applied" : "skipped",
+      warnings: [],
+    },
   };
 };
 

@@ -230,7 +230,7 @@ interface RegionDefinition {
     | { shape: "rect"; centerXCm: number; centerYCm: number; widthCm: number; heightCm: number }
     | { shape: "circle"; centerXCm: number; centerYCm: number; radiusCm: number };
   ioIndex: 0 | 2 | 3 | 4 | 5 | 6;
-  mcuIo: number; // -1...255；仅 status_detection 且 index < 6 可同步设备
+  mcuIo: number; // -1...255；仅 status_detection 且 ioIndex 为 2...6 时可同步设备
   x: number;
   y: number;
   enabled: boolean;
@@ -252,7 +252,7 @@ interface BaseMapInstance {
 
 - 最多保存 32 个区域，`index` 必须唯一。
 - 无 `version: 2` 的旧区域结构不会迁移区域内容，而是生成空 V2 配置。
-- 学习范围 UI 保留但设备接口尚未接入；自定义范围仅本地保存。
+- 学习范围 UI 保留但设备接口尚未接入；自定义范围通过 MQTT `config_file_range` 同步到设备。
 
 ## 3. Meta 接口
 
@@ -729,11 +729,15 @@ PUT /api/mmwave/devices/:deviceId/config
 行为：
 
 - `deviceSettings` 使用严格策略：先写 HA，全部成功后才保存 `config.json`。
-- `regionConfig` 先原子写入本地，再按 `apply` 尝试同步设备。
+- `regionConfig` 默认先原子写入本地，再按 `apply` 尝试同步设备；自定义范围是例外，必须收到设备成功回执后才写入本地。
 - `apply.fourSidedRange = true` 时，依次写四个 `range_*` number 实体，再按 `set_four_sided_range_mode` 按钮。
-- `apply.regionMcuIo = true` 时，区域索引 `0...5` 映射到 `zone_1...zone_6_mcu_io`；更大索引不写设备。
+- `apply.regionMcuIo = true` 时，整体区域单独写入 `deviceSettings.zone1McuIo`，对应 `number.<prefix>_zone_1_mcu_io`。
+- 普通状态检测区域按 `ioIndex` 映射到 `zone_2...zone_6_mcu_io`，不再按区域 `index` 映射；每个设备内 IO2~IO6 只能绑定一个状态检测区域。
+- 每次同步都会根据完整区域配置重算 IO2~IO6，未使用的通道写回 `-1`，避免删除或改绑区域后遗留旧 GPIO 配置。
+- 状态区域选择 `ioIndex = 0`，以及边界、靠近远离、噪点、空标签区域，固定使用 `mcuIo = -1`，不写入区域 MCU IO。
 - 区域设备同步失败不会回滚本地配置，响应 warning 且 `syncState` 保持 `pending`，前端可让用户手动重试。
-- 不传 `apply` 时，区域、自定义范围和底图实例只保存本地。
+- `apply.customRange = true` 时，后端把 `customPointsCm` 编码为模式 `06` 的配置文件范围 Hex，通过 MQTT 下发并等待 `result/config_file_range/set`；失败时不覆盖原有配置，前端保留当前草稿。
+- 不传 `apply` 时，区域和底图实例只保存本地；自定义范围只有明确传入 `customRange = true` 才会尝试设备同步。
 
 成功响应：
 
@@ -747,12 +751,41 @@ PUT /api/mmwave/devices/:deviceId/config
   "applyResult": {
     "fourSidedRange": "applied",
     "regionMcuIo": "skipped",
+    "tagConfig": "skipped",
+    "customRange": "skipped",
     "warnings": []
   }
 }
 ```
 
-`applyResult.fourSidedRange` 和 `applyResult.regionMcuIo` 的值为 `applied | failed | skipped`。
+`applyResult.fourSidedRange`、`applyResult.regionMcuIo`、`applyResult.tagConfig` 和 `applyResult.customRange` 的值为 `applied | failed | skipped`。
+
+整体区域的 MCU IO 使用设备配置字段单独更新，不会生成或下发标签区域记录：
+
+```json
+{
+  "deviceSettings": {
+    "zone1McuIo": 4
+  }
+}
+```
+
+保存成功后，后端写入 `number.<prefix>_zone_1_mcu_io`，并保存到 `config.json.deviceSettings.zone1McuIo`。
+
+### 5.6.1 区域 IO 与设备 IO 状态
+
+`detail.ioStates` 的六个项目固定按传感器 IO 编号返回，不使用整体存在实体作为 IO1：
+
+| 页面项目 | MCU 配置实体 | 触发状态实体 |
+| --- | --- | --- |
+| IO1（整体区域） | `number.<prefix>_zone_1_mcu_io` | `binary_sensor.<prefix>_zone_1_presence` |
+| IO2 | `number.<prefix>_zone_2_mcu_io` | `binary_sensor.<prefix>_zone_2_presence` |
+| IO3 | `number.<prefix>_zone_3_mcu_io` | `binary_sensor.<prefix>_zone_3_presence` |
+| IO4 | `number.<prefix>_zone_4_mcu_io` | `binary_sensor.<prefix>_zone_4_presence` |
+| IO5 | `number.<prefix>_zone_5_mcu_io` | `binary_sensor.<prefix>_zone_5_presence` |
+| IO6 | `number.<prefix>_zone_6_mcu_io` | `binary_sensor.<prefix>_zone_6_presence` |
+
+`binary_sensor.<prefix>_presence` 仍表示雷达整体存在状态，不代表物理 IO1 的触发状态。
 
 失败状态码：
 
@@ -1026,7 +1059,9 @@ GET /api/mmwave/devices
 - 前端必须避免请求重叠；上一轮未完成时跳过下一轮。
 - 请求失败保留最后一次成功数据并显示过期提示，不清空页面。
 - MQTT 无轨迹时 `targets = []`，HA 人数和区域状态仍正常展示。
-- 当前前端不使用 WebSocket。
+- 后端同时订阅 Home Assistant WebSocket 的 `state_changed` 事件。
+- `zone_1_presence` 到 `zone_6_presence` 任一实体发生变化时，后端立即通过 `/api/live/ws` 向对应设备和总览发送刷新通知，前端随后立即 GET 最新详情。
+- 2 秒轮询仅作为 WebSocket 断线或事件遗漏时的兜底，不是 IO 状态的主要更新机制。
 
 ## 8. 当前数据来源说明
 
@@ -1098,7 +1133,293 @@ interface StoredDeviceConfig {
 
 - 当前只实现 C4004 后端能力。
 - C4001/C4002/C4003 当前没有启用 profile 配置。
-- 学习探测范围尚未接入设备；自定义探测范围当前仅本地保存。
-- 探测范围配置和标签区域配置的导入/导出入口当前只显示“功能开发中”。
-- MQTT `multi_tag_config`、`learned_trajectory_range`、`config_file_range` 的 command/result 闭环尚未实现。
-- MQTT `multi_tag_config`、`learned_trajectory_range`、`config_file_range` 还没有落盘到 config。
+- 学习探测范围尚未接入设备；自定义探测范围已接入 C4004 `config_file_range` MQTT command/result 闭环。
+- 自定义探测范围支持 `.ini` 导入/导出；标签区域支持 `.ini` 导入/导出，学习探测范围仍未接入设备。
+- MQTT `learned_trajectory_range` 的 command/result 闭环尚未实现。
+- `config_file_range` 只有设备确认成功后才落盘到 `config.json`。
+
+## 10. 标签区域 MQTT 事件与配置闭环
+
+本节为当前新增链路。区域实时信息不再从 HA zone 实体读取，改为从 C4004 MQTT `state/tag_event` 事件进入后端内存缓存。
+
+### 10.1 标签事件上行
+
+Topic:
+
+```text
+<mqttTopicPrefix>/dfrobot_c4004/<mqttKey>/state/tag_event
+```
+
+Payload:
+
+```json
+{
+  "schema": 1,
+  "type": "tag_event",
+  "device_topic_prefix": "c4004_0",
+  "mqtt_key": "main",
+  "tag_index": 0,
+  "tag_type": "people_counting",
+  "tag_type_code": 3,
+  "io_index": 0,
+  "center_x_cm": 120,
+  "center_y_cm": 350,
+  "moving_count": 1,
+  "static_count": 0
+}
+```
+
+字段说明：
+
+| 字段 | 说明 |
+| --- | --- |
+| `tag_index` | 标签区域索引，范围 `0...31` |
+| `tag_type_code` | 固件枚举：`0 none / 1 boundary / 2 approach_away / 3 people_counting / 4 noise` |
+| `tag_type` | 字符串类型：`none / boundary / approach_away / people_counting / noise` |
+| `io_index` | 固件标签 IO 索引 |
+| `center_x_cm` / `center_y_cm` | 标签中心坐标，单位 cm |
+| `moving_count` / `static_count` | `people_counting` 类型专用 |
+| `boundary_state` | `boundary` 类型专用：`enter / exit / none` |
+| `approach_away_state` | `approach_away` 类型专用：`approach / away / none` |
+
+后端路由规则：
+
+- 使用 `device_topic_prefix + mqtt_key` 精确匹配设备。
+- 匹配成功后写入 `RuntimeCacheStore` 的 `deviceId -> tagIndex` 缓存。
+- 收到事件后通过 `/api/live/ws` 通知前端刷新 `overview/detail`。
+- 事件不落盘；后端重启后等待下一条事件恢复显示。
+- 如果某个区域尚未收到事件，`RegionOverlay.tagDataAvailable = false`，前端应显示等待态，不伪造 0。
+
+### 10.2 RegionOverlay 新增字段
+
+```ts
+interface RegionOverlay {
+  tagIndex?: number;
+  tagType?: "none" | "boundary" | "approach_away" | "people_counting" | "noise";
+  tagTypeCode?: number;
+  tagDataAvailable?: boolean;
+  tagUpdatedAt?: string;
+  tagTypeMismatch?: boolean;
+  movingCount?: number;
+  staticCount?: number;
+  boundaryState?: "enter" | "exit" | "none";
+  approachAwayState?: "approach" | "away" | "none";
+}
+```
+
+### 10.3 标签配置下发
+
+保存、删除、导入标签区域，或拖拽/缩放结束后，前端可以通过 `PUT /api/mmwave/devices/:deviceId/config` 触发标签配置下发：
+
+```json
+{
+  "regionConfig": {},
+  "apply": {
+    "tagConfig": true
+  }
+}
+```
+
+后端行为：
+
+- 先保存 `regionConfig` 到 `<deviceId>/config.json`。
+- 将 `regions` 编码为固件 `multi_tag_config.hex`。
+- 发布到：
+
+```text
+<mqttTopicPrefix>/dfrobot_c4004/<mqttKey>/command/multi_tag_config/set
+```
+
+命令 payload:
+
+```json
+{
+  "schema": 1,
+  "type": "multi_tag_config",
+  "device_topic_prefix": "c4004_0",
+  "mqtt_key": "main",
+  "request_id": "c4004-xxx-lz8n2a-ab12cd",
+  "hex": "0001..."
+}
+```
+
+设备回执 topic:
+
+```text
+<mqttTopicPrefix>/dfrobot_c4004/<mqttKey>/result/multi_tag_config/set
+```
+
+回执 payload:
+
+```json
+{
+  "request_id": "c4004-xxx-lz8n2a-ab12cd",
+  "ok": true,
+  "tag_count": 1,
+  "hex": "0001..."
+}
+```
+
+失败回执示例：
+
+```json
+{
+  "request_id": "c4004-xxx-lz8n2a-ab12cd",
+  "ok": false,
+  "error": "Multi tag config has invalid tag type or scope type"
+}
+```
+
+响应中的 `applyResult` 现在包含：
+
+```ts
+interface ConfigApplyResult {
+  fourSidedRange: "applied" | "failed" | "skipped";
+  regionMcuIo: "applied" | "failed" | "skipped";
+  tagConfig: "applied" | "failed" | "skipped";
+  customRange: "applied" | "failed" | "skipped";
+  warnings: string[];
+}
+```
+
+`regionConfig.syncState` 现在包含：
+
+```ts
+interface RegionSyncState {
+  fourSidedRange: "synced" | "pending" | "local_only";
+  regionMcuIo: "synced" | "pending" | "local_only";
+  tagConfig: "synced" | "pending" | "local_only";
+  customRange: "synced" | "pending" | "local_only";
+  updatedAt?: string;
+}
+```
+
+### 10.5 自定义探测范围同步
+
+自定义范围使用 C4004 的配置文件范围模式 `0x06`，不是 `multi_tag_config`。前端确认后请求：
+
+```json
+{
+  "regionConfig": {
+    "detection": {
+      "mode": "custom",
+      "appliedMode": "custom",
+      "customConfirmed": true,
+      "customPointsCm": [
+        { "x": -200, "y": 0 },
+        { "x": -200, "y": 400 },
+        { "x": 200, "y": 400 },
+        { "x": 200, "y": 0 }
+      ]
+    }
+  },
+  "apply": { "customRange": true }
+}
+```
+
+后端将点集编码为 `[06][point_count][x/y...]`，通过以下 topic 下发：
+
+```text
+<mqttTopicPrefix>/dfrobot_c4004/<mqttKey>/command/config_file_range/set
+```
+
+设备回执 topic：
+
+```text
+<mqttTopicPrefix>/dfrobot_c4004/<mqttKey>/result/config_file_range/set
+```
+
+坐标单位为厘米，协议使用符号位编码；下发设备时 X 坐标使用 `xDevice = -xUi`，Y 坐标不变。点数必须为 `3...150`。只有收到 `ok: true` 回执后才写入 `config.json`；同步失败时保留原配置，并在 `applyResult.warnings` 返回原因，前端保留当前草稿供重试。
+
+#### 自定义范围 `.ini` 文件
+
+区域管理菜单的自定义范围导出文件使用 UTF-8 `.ini` 格式，每行一个设备坐标点：
+
+```ini
+(200,0)
+(200,400)
+(-200,400)
+(-200,0)
+```
+
+- 文件坐标单位为厘米，导出使用 `xFile = -xUi`、`yFile = yUi`；导入执行相反转换。
+- 点顺序保持原样，不自动闭合，不重复追加首点。
+- 空行会被忽略，点数限制为 `3...150`，坐标限制为 `-32767...32767`。
+- 只有当前模式为自定义探测范围且至少有 3 个有效点时才能导出。
+- 从 `.ini` 导入后，模式自动设置为 `custom`，并通过 `apply.customRange = true` 同步到设备。
+- 设备同步成功后才保存新范围；失败时保留前端导入草稿，不覆盖上一次设备成功配置。
+
+## 11. 设备区域事件日志
+
+区域日志直接来自 MQTT `state/tag_event`。后端只在状态发生变化时写入日志，连续重复事件不会重复落盘。日志按设备和北京时间日期保存：
+
+```text
+<dataDir>/<deviceId>/log/YYYY/MM/DD.jsonl
+```
+
+查询可用日期：
+
+```http
+GET /api/mmwave/devices/:deviceId/logs/calendar?year=2026&month=7
+```
+
+按日期分页查询，每页默认 50 条、最大 200 条：
+
+```http
+GET /api/mmwave/devices/:deviceId/logs?date=2026-07-16&page=1&pageSize=50
+```
+
+返回字段包括 `date/page/pageSize/total/hasMore/logs`。日志按时间倒序返回；设备离线时仍可读取历史日志。状态检测记录运动、静止和总人数，靠近远离记录 `approach/away`，边界检测记录 `enter/exit`。`none` 不写入文件，但会重置方向事件的去重状态。设备解绑时整个设备目录及日志一并删除。
+
+每条新日志保存事件发生时的设备名称和部署名称，但不重复保存可由目录确定的设备 ID，也不保存无业务用途的 schema 和随机 ID：
+
+```json
+{
+  "occurredAt": "2026-07-16T03:23:00.000Z",
+  "localDate": "2026-07-16",
+  "deviceName": "c4004_0",
+  "deploymentName": "厨房",
+  "regionIndex": 0,
+  "regionLabel": "办公区",
+  "regionType": "status_detection",
+  "eventType": "status_changed",
+  "movingCount": 1,
+  "staticCount": 2,
+  "totalCount": 3,
+  "message": "1号办公区当前运动人数为1人，静止人数为2人，总人数为3人"
+}
+```
+
+旧版包含 `schema/id/deviceId` 的 JSONL 记录仍可读取，接口会忽略这些旧字段，并使用当前设备信息补齐旧记录缺少的设备名称和部署名称。
+
+### 日志保留策略
+
+日志保留策略保存在对应设备的 `config.json`，继续使用设备配置接口：
+
+```http
+GET /api/mmwave/devices/:deviceId/config
+PUT /api/mmwave/devices/:deviceId/config
+```
+
+配置字段如下：
+
+```json
+{
+  "logRetention": {
+    "mode": "limited",
+    "value": 30,
+    "unit": "day",
+    "updatedAt": "2026-07-16T08:00:00.000Z"
+  }
+}
+```
+
+`mode` 支持 `forever`、`limited`、`none`。`limited` 的 `value` 必须为正整数，`unit` 支持 `day`、`week`、`month`、`year`。旧设备缺少该字段时按 `forever` 处理。
+
+保存策略不会立即删除日志。后端使用 `Asia/Shanghai` 计算下一个本地零点，每天零点检查所有已绑定设备并删除过期的日期文件；服务重启后不补执行错过的零点任务，只等待下一个零点。清理只处理合法的 `YYYY/MM/DD.jsonl` 路径，清理后会删除空的年月目录。
+
+- `forever`：不自动删除日志。
+- `limited`：保留当前日期起的配置期限，超出期限的日期文件在零点删除。
+- `none`：停止写入 JSONL；已有日志在下一个零点清理。实时事件仍通过 WebSocket 推送，前端当前页面最多保留最近 10 条内存事件，刷新页面后清空。
+
+设备解绑时，设备目录、日志文件和日志保留配置一起删除。

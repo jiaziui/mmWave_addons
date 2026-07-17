@@ -227,7 +227,7 @@ button {
 }
 
 .sidebar-notice {
-  margin: 0.75rem 0 0;
+  margin: 0;
   padding: 0.75rem 0.9rem;
   border-radius: 14px;
   font-size: 0.8rem;
@@ -499,6 +499,265 @@ button {
 
 .compact-panel {
   padding: 1rem 1.1rem;
+}
+
+.detail-panel-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.35rem;
+  margin-bottom: 0.9rem;
+  padding: 0.3rem;
+  border-radius: 14px;
+  background: rgba(43, 90, 204, 0.06);
+}
+
+.detail-panel-tabs button {
+  min-height: 38px;
+  border: 0;
+  border-radius: 11px;
+  color: #61789f;
+  background: transparent;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.detail-panel-tabs button.active {
+  color: #173f89;
+  background: #fff;
+  box-shadow: 0 8px 20px rgba(42, 78, 145, 0.12);
+}
+
+.device-log-panel {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.device-log-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.45rem;
+  align-items: end;
+}
+
+.device-log-filters {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(4.1rem, max-content);
+  gap: 0.45rem;
+  align-items: end;
+}
+
+.device-log-filters label {
+  display: grid;
+  gap: 0.3rem;
+  color: #6b82a8;
+  font-size: 0.72rem;
+}
+
+.device-log-filters select,
+.device-log-refresh {
+  min-width: 0;
+  height: 36px;
+  padding: 0 0.55rem;
+  border: 1px solid rgba(84, 122, 191, 0.2);
+  border-radius: 10px;
+  color: #17355f;
+  background: rgba(248, 251, 255, 0.96);
+}
+
+.device-log-retention-button {
+  height: 36px;
+  padding: 0 0.65rem;
+  border: 1px solid rgba(84, 122, 191, 0.22);
+  border-radius: 10px;
+  color: #315b9e;
+  background: rgba(247, 250, 255, 0.95);
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.device-log-memory-note {
+  padding: 0.65rem 0.75rem;
+  border-radius: 11px;
+  color: #315b9e;
+  background: rgba(43, 90, 204, 0.08);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.device-log-modal-backdrop {
+  position: fixed;
+  z-index: 20;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: rgba(17, 32, 68, 0.3);
+}
+
+.device-log-retention-modal {
+  width: min(360px, 100%);
+  display: grid;
+  gap: 0.8rem;
+  padding: 1.15rem;
+  border: 1px solid rgba(128, 157, 212, 0.2);
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 20px 60px rgba(42, 78, 145, 0.25);
+}
+
+.device-log-retention-head,
+.device-log-retention-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+}
+
+.device-log-retention-head h3 {
+  margin: 0;
+  color: #17355f;
+}
+
+.device-log-retention-head button {
+  border: 0;
+  color: #6b82a8;
+  background: transparent;
+  font-size: 1.3rem;
+  cursor: pointer;
+}
+
+.device-log-retention-modal label,
+.device-log-retention-period {
+  display: grid;
+  gap: 0.35rem;
+  color: #61789f;
+  font-size: 0.78rem;
+}
+
+.device-log-retention-modal select,
+.device-log-retention-modal input {
+  min-width: 0;
+  height: 36px;
+  padding: 0 0.6rem;
+  border: 1px solid rgba(84, 122, 191, 0.2);
+  border-radius: 10px;
+  color: #17355f;
+  background: #f8fbff;
+}
+
+.device-log-retention-period {
+  grid-template-columns: 1fr 1fr;
+}
+
+.device-log-retention-hint {
+  margin: 0;
+  padding: 0.65rem 0.75rem;
+  border-radius: 10px;
+  color: #80611a;
+  background: rgba(234, 176, 54, 0.14);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.device-log-retention-actions {
+  justify-content: flex-end;
+}
+
+.device-log-retention-actions > button {
+  min-height: 34px;
+  padding: 0 0.8rem;
+  border: 1px solid rgba(84, 122, 191, 0.18);
+  border-radius: 9px;
+  color: #315b9e;
+  background: #f7faff;
+  cursor: pointer;
+}
+
+.device-log-refresh {
+  color: #fff;
+  border-color: #347cf4;
+  background: #347cf4;
+  font-weight: 700;
+  cursor: pointer;
+  width: 100%;
+  white-space: nowrap;
+}
+
+.device-log-refresh:disabled,
+.device-log-pagination button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.device-log-offline,
+.device-log-error,
+.device-log-empty {
+  padding: 0.7rem 0.8rem;
+  border-radius: 11px;
+  color: #80611a;
+  background: rgba(234, 176, 54, 0.14);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.device-log-error {
+  color: #a63c4a;
+  background: rgba(221, 80, 100, 0.1);
+}
+
+.device-log-list {
+  display: grid;
+  gap: 0.55rem;
+  max-height: 350px;
+  overflow-y: auto;
+  padding-right: 0.2rem;
+}
+
+.device-log-entry {
+  display: grid;
+  gap: 0.45rem;
+  padding: 0.72rem 0.8rem;
+  border-left: 3px solid #4d9df7;
+  border-radius: 11px;
+  background: rgba(243, 248, 255, 0.94);
+}
+
+.device-log-status_changed { border-left-color: #f7a43b; }
+.device-log-enter,
+.device-log-exit { border-left-color: #ff6b6b; }
+
+.device-log-entry-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  color: #7185a7;
+  font-size: 0.7rem;
+}
+
+.device-log-entry strong {
+  color: #19375f;
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.device-log-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  color: #7185a7;
+  font-size: 0.72rem;
+}
+
+.device-log-pagination button {
+  min-height: 32px;
+  padding: 0 0.75rem;
+  border: 1px solid rgba(84, 122, 191, 0.18);
+  border-radius: 9px;
+  color: #315b9e;
+  background: rgba(247, 250, 255, 0.95);
+  cursor: pointer;
 }
 
 .two-stat-row article {
@@ -942,6 +1201,14 @@ button {
   .modal-header,
   .modal-actions {
     flex-direction: column;
+  }
+
+  .device-log-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .device-log-retention-button {
+    width: 100%;
   }
 }
 
@@ -1739,6 +2006,13 @@ button {
   color: #122542;
 }
 
+.device-card-deployment {
+  display: block;
+  margin-top: 0.2rem;
+  font-size: 0.82rem;
+  color: #6d84ab;
+}
+
 .device-card-head small {
   padding: 0;
   border: 0;
@@ -1778,6 +2052,10 @@ button {
   stroke-width: 0.25;
 }
 
+.radar-base-map {
+  pointer-events: none;
+}
+
 .radar-tick-label {
   fill: #6d84ab;
   font-size: 2.4px;
@@ -1786,7 +2064,8 @@ button {
 
 .radar-region-shape {
   fill-opacity: 0.22;
-  stroke-width: 0.55;
+  stroke-width: 2px;
+  vector-effect: non-scaling-stroke;
 }
 
 .radar-detection-shape {
@@ -2373,6 +2652,54 @@ text.region-shape-label {
   line-height: 1.5;
 }
 
+.region-detection-panel {
+  gap: 0;
+}
+
+.region-detection-panel .region-range-hint {
+  padding: 0.85rem 1rem 0.35rem;
+}
+
+.region-detection-panel .detection-mode-tabs {
+  margin: 0.55rem 0 0;
+}
+
+.region-detection-panel .region-form-grid,
+.region-detection-panel .region-range-switch-row,
+.region-detection-panel .custom-range-status {
+  margin: 0.85rem 1rem 0;
+}
+
+.region-detection-panel .region-form-grid {
+  padding: 0.85rem 0 0;
+}
+
+.region-detection-panel .region-panel-actions {
+  margin-top: 0.85rem;
+  margin-bottom: 0.35rem;
+  padding: 1rem;
+}
+
+.region-detection-footer {
+  display: flex;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 0.75rem;
+  padding: 0.9rem 1rem 1.1rem;
+  border-top: 1px solid rgba(98, 123, 170, 0.1);
+  background: rgba(247, 250, 255, 0.65);
+}
+
+.region-detection-action-btn {
+  width: 100%;
+  min-height: 42px;
+  padding: 0.6rem 1rem;
+  border-radius: 999px;
+  font-size: 0.86rem;
+  font-weight: 650;
+  line-height: 1.2;
+}
+
 .region-range-switch-row {
   display: flex;
   align-items: center;
@@ -2687,6 +3014,27 @@ text.region-shape-label {
   font-weight: 700;
 }
 
+.region-panel-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.region-panel-head-actions > button {
+  border: 0;
+  border-radius: 999px;
+  padding: 0.4rem 0.8rem;
+  color: #fff;
+  background: linear-gradient(135deg, #2f67e9, #4a90ff);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.region-panel-head-actions > button.region-sync-btn {
+  background: linear-gradient(135deg, #4a90ff, #2f67e9);
+}
+
 .region-list-body {
   display: block;
   gap: 0;
@@ -2805,6 +3153,10 @@ text.region-shape-label {
   gap: 0.4rem;
 }
 
+.region-form-grid .region-form-full {
+  grid-column: 1 / -1;
+}
+
 .region-form-grid label > span {
   color: #6d84ab;
   font-size: 0.76rem;
@@ -2886,6 +3238,26 @@ text.region-shape-label {
   padding-inline: clamp(0.8rem, 5%, 1.4rem);
   line-height: 1.25;
   white-space: normal;
+}
+
+.region-param-footer {
+  display: flex;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 0.35rem;
+  padding: 0.9rem 1rem 1.05rem;
+  border-top: 1px solid rgba(98, 123, 170, 0.1);
+  background: rgba(247, 250, 255, 0.65);
+}
+
+.region-reset-params-btn {
+  width: 100%;
+  min-height: 40px;
+  padding: 0.55rem 1rem;
+  border-radius: 999px;
+  font-size: 0.84rem;
+  font-weight: 650;
+  line-height: 1.2;
 }
 
 .primary-button:disabled,
@@ -3161,6 +3533,7 @@ text.region-shape-label {
 }
 
 .bg-material-card {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 0.45rem;
@@ -3183,6 +3556,33 @@ text.region-shape-label {
 
 .bg-material-card:active {
   transform: scale(0.98);
+}
+
+.bg-material-delete {
+  position: absolute;
+  top: 0.42rem;
+  right: 0.42rem;
+  display: grid;
+  place-items: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  border: 0;
+  border-radius: 999px;
+  color: #fff;
+  background: rgba(215, 54, 54, 0.9);
+  box-shadow: 0 4px 10px rgba(215, 54, 54, 0.18);
+  cursor: pointer;
+  font-size: 0.95rem;
+  line-height: 1;
+  z-index: 2;
+}
+
+.bg-material-delete:hover {
+  background: #c52f2f;
+}
+
+.bg-material-delete:active {
+  transform: scale(0.96);
 }
 
 .bg-material-card.active {

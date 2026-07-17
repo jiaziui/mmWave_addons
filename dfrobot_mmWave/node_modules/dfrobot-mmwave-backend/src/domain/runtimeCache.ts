@@ -1,6 +1,14 @@
 import type { StoredMmwaveDevice } from "../config/storage";
-import type { RangeBox, StoredRegionConfig, StoredZoneSnapshot, TrajectorySnapshot } from "../types/mmwave";
+import type {
+  RangeBox,
+  StoredRegionConfig,
+  StoredZoneSnapshot,
+  TagRegionRuntime,
+  TrajectorySnapshot,
+  LearnedRangeRuntime,
+} from "../types/mmwave";
 import type { ProfileSource, ProfileStatus } from "../types/profiles";
+import type { TagEventSnapshot } from "./tagEvent";
 
 export interface C4004RuntimeIdentity {
   name?: string;
@@ -31,6 +39,9 @@ export interface C4004NativeRuntime {
 
 export interface C4004MqttRuntime {
   trajectory?: TrajectorySnapshot;
+  tagRegions: Map<number, TagRegionRuntime>;
+  lastEmittedTargetCount?: number;
+  lastEmittedAt?: string;
   updatedAt?: string;
 }
 
@@ -41,6 +52,7 @@ export interface C4004RuntimeCache {
   discovery: C4004DiscoveryRuntime;
   native: C4004NativeRuntime;
   mqtt: C4004MqttRuntime;
+  learnedRange: LearnedRangeRuntime;
   updatedAt: string;
 }
 
@@ -72,7 +84,17 @@ export class RuntimeCacheStore {
         identity: {},
         discovery: createDefaultDiscovery(now),
         native: {},
-        mqtt: {},
+        mqtt: {
+          tagRegions: new Map(),
+        },
+        learnedRange: {
+          status: "idle",
+          learningEnabled: false,
+          singleTargetConfirmCount: 0,
+          pointCount: device.regionConfig.detection.learnedPointsCm.length,
+          pointsCm: device.regionConfig.detection.learnedPointsCm.map((point) => ({ ...point })),
+          updatedAt: now,
+        },
         updatedAt: now,
       },
     };
@@ -120,21 +142,78 @@ export class RuntimeCacheStore {
     return cache;
   }
 
-  updateTrajectory(deviceId: string, trajectory: TrajectorySnapshot): void {
+  updateTrajectory(deviceId: string, trajectory: TrajectorySnapshot): boolean {
     const current = this.devices.get(deviceId);
     if (!current) {
-      return;
+      return false;
+    }
+    const previousCount = current.state.mqtt.lastEmittedTargetCount;
+    const targetCount = trajectory.targetCount;
+    if (targetCount === 0 && previousCount === 0) {
+      return false;
     }
     current.state.mqtt = {
       ...current.state.mqtt,
       trajectory,
+      lastEmittedTargetCount: targetCount,
+      lastEmittedAt: trajectory.updatedAt,
       updatedAt: trajectory.updatedAt,
     };
     current.state.updatedAt = new Date().toISOString();
+    return true;
+  }
+
+  updateTagRegion(deviceId: string, event: TagEventSnapshot): boolean {
+    const current = this.devices.get(deviceId);
+    if (!current) {
+      return false;
+    }
+
+    current.state.mqtt.tagRegions.set(event.tagIndex, {
+      tagIndex: event.tagIndex,
+      tagType: event.tagType,
+      tagTypeCode: event.tagTypeCode,
+      ioIndex: event.ioIndex,
+      centerXCm: event.centerXCm,
+      centerYCm: event.centerYCm,
+      movingCount: event.movingCount,
+      staticCount: event.staticCount,
+      boundaryState: event.boundaryState,
+      approachAwayState: event.approachAwayState,
+      receivedAt: event.receivedAt,
+      dataAvailable: true,
+    });
+    current.state.mqtt.updatedAt = event.receivedAt;
+    current.state.updatedAt = event.receivedAt;
+    return true;
   }
 
   getTrajectory(deviceId: string): TrajectorySnapshot | null {
     return this.devices.get(deviceId)?.state.mqtt.trajectory ?? null;
+  }
+
+  getTagRegions(deviceId: string): Map<number, TagRegionRuntime> {
+    return this.devices.get(deviceId)?.state.mqtt.tagRegions ?? new Map();
+  }
+
+  getLearnedRange(deviceId: string): LearnedRangeRuntime | undefined {
+    const learned = this.devices.get(deviceId)?.state.learnedRange;
+    return learned ? { ...learned, pointsCm: learned.pointsCm.map((point) => ({ ...point })) } : undefined;
+  }
+
+  updateLearnedRange(deviceId: string, update: Partial<LearnedRangeRuntime>): LearnedRangeRuntime | undefined {
+    const current = this.devices.get(deviceId)?.state;
+    if (!current) {
+      return undefined;
+    }
+    current.learnedRange = {
+      ...current.learnedRange,
+      ...update,
+      pointsCm: update.pointsCm ? update.pointsCm.map((point) => ({ ...point })) : current.learnedRange.pointsCm,
+      updatedAt: update.updatedAt ?? new Date().toISOString(),
+    };
+    current.updatedAt = current.learnedRange.updatedAt;
+    return this.getLearnedRange(deviceId);
   }
 
   hydrateDevice(device: StoredMmwaveDevice): StoredMmwaveDevice {

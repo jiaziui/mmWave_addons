@@ -6,19 +6,94 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.MqttBridge = void 0;
 const mqtt_1 = __importDefault(require("mqtt"));
 const registry_1 = require("./profiles/registry");
+const tagEvent_1 = require("./tagEvent");
 const trajectory_1 = require("./trajectory");
+const parseBridgeTopic = (topic) => {
+    const marker = "/dfrobot_c4004/";
+    const markerIndex = topic.indexOf(marker);
+    if (markerIndex <= 0) {
+        return null;
+    }
+    const topicPrefix = topic.slice(0, markerIndex);
+    const remainder = topic.slice(markerIndex + marker.length);
+    const [mqttKey, ...rest] = remainder.split("/");
+    if (!topicPrefix || !mqttKey || !rest.length) {
+        return null;
+    }
+    return {
+        topicPrefix,
+        mqttKey,
+        suffix: rest.join("/"),
+    };
+};
+const parseMultiTagConfigResult = (topic, payload) => {
+    try {
+        const parsed = JSON.parse(payload);
+        if (!parsed || typeof parsed.ok !== "boolean") {
+            return null;
+        }
+        const route = parseBridgeTopic(topic);
+        if (!route) {
+            return null;
+        }
+        return {
+            topic,
+            topicPrefix: route.topicPrefix,
+            mqttKey: route.mqttKey,
+            requestId: typeof parsed.request_id === "string" ? parsed.request_id : undefined,
+            ok: parsed.ok,
+            error: typeof parsed.error === "string" ? parsed.error : undefined,
+            tagCount: typeof parsed.tag_count === "number" ? parsed.tag_count : undefined,
+            hex: typeof parsed.hex === "string" ? parsed.hex : undefined,
+            receivedAt: new Date().toISOString(),
+        };
+    }
+    catch {
+        return null;
+    }
+};
+const parseConfigFileRangeResult = (topic, payload) => {
+    try {
+        const parsed = JSON.parse(payload);
+        if (!parsed || typeof parsed.ok !== "boolean") {
+            return null;
+        }
+        const route = parseBridgeTopic(topic);
+        if (!route) {
+            return null;
+        }
+        return {
+            topic,
+            topicPrefix: route.topicPrefix,
+            mqttKey: route.mqttKey,
+            requestId: typeof parsed.request_id === "string" ? parsed.request_id : undefined,
+            ok: parsed.ok,
+            error: typeof parsed.error === "string" ? parsed.error : undefined,
+            pointCount: typeof parsed.point_count === "number" ? parsed.point_count : undefined,
+            hex: typeof parsed.hex === "string" ? parsed.hex : undefined,
+            receivedAt: new Date().toISOString(),
+        };
+    }
+    catch {
+        return null;
+    }
+};
 class MqttBridge {
-    constructor(config, logger, onSnapshot) {
+    constructor(config, logger, handlers = {}) {
         this.config = config;
         this.logger = logger;
-        this.onSnapshot = onSnapshot;
+        this.handlers = handlers;
         this.client = null;
         this.subscriptions = new Set();
         this.connected = false;
         this.devices = [];
     }
     start() {
-        if (!this.config || this.client) {
+        if (!this.config) {
+            this.logger.warn("MQTT bridge is not configured; live tag events and device logs are disabled");
+            return;
+        }
+        if (this.client) {
             return;
         }
         const auth = this.config.username || this.config.password
@@ -43,19 +118,73 @@ class MqttBridge {
             this.logger.warn({ error }, "MQTT bridge error");
         });
         this.client.on("message", (topic, payload) => {
-            const snapshot = (0, trajectory_1.parseTrajectorySnapshot)(topic, payload.toString("utf8"));
-            if (!snapshot) {
+            const raw = payload.toString("utf8");
+            const route = parseBridgeTopic(topic);
+            const trajectory = (0, trajectory_1.parseTrajectorySnapshot)(topic, raw);
+            if (trajectory) {
+                const device = this.findDeviceByRoute(trajectory.topicPrefix, trajectory.mqttKey);
+                if (device) {
+                    this.handlers.onTrajectorySnapshot?.(device.id, trajectory);
+                }
                 return;
             }
-            const device = this.devices.find((entry) => entry.mqttTopicPrefix === snapshot.topicPrefix && entry.mqttKey === snapshot.mqttKey);
-            if (!device) {
+            const tagEvent = (0, tagEvent_1.parseTagEventSnapshot)(topic, raw);
+            if (tagEvent) {
+                const device = this.findDeviceByRoute(tagEvent.topicPrefix, tagEvent.mqttKey);
+                if (device) {
+                    this.logger.debug({
+                        deviceId: device.id,
+                        topic,
+                        tagIndex: tagEvent.tagIndex,
+                        tagType: tagEvent.tagType,
+                    }, "MQTT tag event received");
+                    this.handlers.onTagEventSnapshot?.(device.id, tagEvent);
+                }
+                else {
+                    this.logger.warn({
+                        topic,
+                        topicPrefix: tagEvent.topicPrefix,
+                        mqttKey: tagEvent.mqttKey,
+                        tagIndex: tagEvent.tagIndex,
+                    }, "MQTT tag event has no matching device route");
+                }
                 return;
             }
-            this.onSnapshot?.(device.id, snapshot);
+            if (route?.suffix === "state/tag_event") {
+                this.logger.warn({ topic, payload: raw.slice(0, 1000) }, "MQTT tag event payload was rejected");
+                return;
+            }
+            if (route?.suffix === "result/multi_tag_config/set") {
+                const result = parseMultiTagConfigResult(topic, raw);
+                if (!result) {
+                    return;
+                }
+                const device = this.findDeviceByRoute(result.topicPrefix, result.mqttKey);
+                if (device) {
+                    this.handlers.onMultiTagConfigResult?.(device.id, result);
+                }
+            }
+            if (route?.suffix === "result/config_file_range/set") {
+                const result = parseConfigFileRangeResult(topic, raw);
+                if (!result) {
+                    return;
+                }
+                const device = this.findDeviceByRoute(result.topicPrefix, result.mqttKey);
+                if (device) {
+                    this.handlers.onConfigFileRangeResult?.(device.id, result);
+                }
+            }
         });
     }
     setDevices(devices) {
         this.devices = devices;
+        this.logger.info({
+            devices: devices.map((device) => ({
+                deviceId: device.id,
+                topicPrefix: device.mqttTopicPrefix,
+                mqttKey: device.mqttKey,
+            })),
+        }, "MQTT bridge device routes updated");
         this.syncSubscriptions();
     }
     isConnected() {
@@ -64,26 +193,89 @@ class MqttBridge {
     isConfigured() {
         return Boolean(this.config);
     }
+    publishJson(topic, payload, qos = 1, retain = false) {
+        if (!this.client || !this.connected) {
+            return false;
+        }
+        this.client.publish(topic, JSON.stringify(payload), { qos, retain });
+        return true;
+    }
+    publishMultiTagConfigCommand(device, payload) {
+        const profile = (0, registry_1.getMmwaveProfile)(device.profileId);
+        const topic = profile?.mqttTopics.multiTagConfigCommandTopic
+            ? this.buildTopic(device, profile.mqttTopics.multiTagConfigCommandTopic)
+            : null;
+        if (!topic) {
+            return false;
+        }
+        return this.publishJson(topic, {
+            schema: 1,
+            type: "multi_tag_config",
+            device_topic_prefix: device.mqttTopicPrefix,
+            mqtt_key: device.mqttKey,
+            request_id: payload.request_id,
+            hex: payload.hex,
+        }, 1, false);
+    }
+    publishConfigFileRangeCommand(device, payload) {
+        const profile = (0, registry_1.getMmwaveProfile)(device.profileId);
+        const topic = profile?.mqttTopics.configFileRangeCommandTopic
+            ? this.buildTopic(device, profile.mqttTopics.configFileRangeCommandTopic)
+            : null;
+        if (!topic) {
+            return false;
+        }
+        return this.publishJson(topic, {
+            schema: 1,
+            type: "config_file_range",
+            device_topic_prefix: device.mqttTopicPrefix,
+            mqtt_key: device.mqttKey,
+            request_id: payload.request_id,
+            hex: payload.hex,
+        }, 1, false);
+    }
+    findDeviceByRoute(topicPrefix, mqttKey) {
+        return this.devices.find((entry) => entry.mqttTopicPrefix === topicPrefix && entry.mqttKey === mqttKey);
+    }
+    buildTopic(device, suffix) {
+        const profile = (0, registry_1.getMmwaveProfile)(device.profileId);
+        if (!profile?.mqttTopics.component) {
+            return null;
+        }
+        return `${device.mqttTopicPrefix}/${profile.mqttTopics.component}/${device.mqttKey}/${suffix}`;
+    }
     syncSubscriptions() {
         if (!this.connected || !this.client) {
             return;
         }
         for (const device of this.devices) {
             const profile = (0, registry_1.getMmwaveProfile)(device.profileId);
-            const topic = profile?.getTrajectoryTopic?.(device);
-            if (!topic) {
+            if (!profile) {
                 continue;
             }
-            if (this.subscriptions.has(topic)) {
-                continue;
-            }
-            this.client.subscribe(topic, { qos: 1 }, (error) => {
-                if (error) {
-                    this.logger.warn({ error, topic }, "MQTT subscribe failed");
-                    return;
+            const topics = [
+                profile.mqttTopics.trajectoryStateTopic,
+                profile.mqttTopics.tagEventStateTopic,
+                profile.mqttTopics.multiTagConfigResultTopic,
+                profile.mqttTopics.configFileRangeResultTopic,
+            ];
+            for (const suffix of topics) {
+                if (!suffix) {
+                    continue;
                 }
-                this.subscriptions.add(topic);
-            });
+                const topic = this.buildTopic(device, suffix);
+                if (!topic || this.subscriptions.has(topic)) {
+                    continue;
+                }
+                this.client.subscribe(topic, { qos: 1 }, (error) => {
+                    if (error) {
+                        this.logger.warn({ error, topic }, "MQTT subscribe failed");
+                        return;
+                    }
+                    this.subscriptions.add(topic);
+                    this.logger.info({ topic }, "MQTT bridge subscription active");
+                });
+            }
         }
     }
 }

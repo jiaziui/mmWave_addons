@@ -84,6 +84,22 @@ class BaseMapStorage {
         const filePath = node_path_1.default.join(this.userDir, asset.fileName);
         return node_fs_1.default.existsSync(filePath) ? { asset, filePath } : null;
     }
+    deleteAsset(assetId) {
+        if (!SAFE_ASSET_ID.test(assetId)) {
+            return false;
+        }
+        const manifest = this.readManifest();
+        const asset = manifest.assets.find((entry) => entry.id === assetId);
+        if (!asset) {
+            return false;
+        }
+        node_fs_1.default.rmSync(node_path_1.default.join(this.userDir, asset.fileName), { force: true });
+        this.writeManifest({
+            version: MANIFEST_VERSION,
+            assets: manifest.assets.filter((entry) => entry.id !== assetId),
+        });
+        return true;
+    }
     readManifest() {
         this.ensureUserDir();
         const manifestPath = node_path_1.default.join(this.userDir, MANIFEST_FILE);

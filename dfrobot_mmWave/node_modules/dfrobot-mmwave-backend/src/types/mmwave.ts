@@ -12,6 +12,55 @@ export type RegionType =
   | "boundary"
   | "empty_tag";
 
+export type DeviceLogEventType =
+  | "status_changed"
+  | "approach"
+  | "away"
+  | "enter"
+  | "exit";
+
+export type DeviceLogRetentionMode = "forever" | "limited" | "none";
+export type DeviceLogRetentionUnit = "day" | "week" | "month" | "year";
+
+export interface DeviceLogRetention {
+  mode: DeviceLogRetentionMode;
+  value?: number;
+  unit?: DeviceLogRetentionUnit;
+  updatedAt: string;
+}
+
+export interface DeviceLogEntry {
+  occurredAt: string;
+  localDate: string;
+  deviceName: string;
+  deploymentName: string;
+  regionIndex: number;
+  regionLabel: string;
+  regionType: RegionType;
+  eventType: DeviceLogEventType;
+  movingCount?: number;
+  staticCount?: number;
+  totalCount?: number;
+  message: string;
+}
+
+export interface DeviceLogCalendar {
+  year: number;
+  month: number;
+  years: number[];
+  months: number[];
+  days: number[];
+}
+
+export interface DeviceLogPage {
+  date: string;
+  page: number;
+  pageSize: number;
+  total: number;
+  hasMore: boolean;
+  logs: DeviceLogEntry[];
+}
+
 export type RegionGeometry =
   | {
       shape: "rect";
@@ -44,6 +93,27 @@ export type RegionGeometryMeters =
 
 export type DetectionRangeMode = "rect" | "learned" | "custom";
 
+export type LearnedRangeStatus =
+  | "idle"
+  | "confirming_single_target"
+  | "starting"
+  | "learning"
+  | "stopping"
+  | "querying"
+  | "ready"
+  | "error";
+
+export interface LearnedRangeRuntime {
+  status: LearnedRangeStatus;
+  learningEnabled: boolean;
+  singleTargetConfirmCount: number;
+  pointCount: number;
+  pointsCm: Array<{ x: number; y: number }>;
+  error?: string;
+  message?: string;
+  updatedAt: string;
+}
+
 export interface DetectionRangeConfig {
   mode: DetectionRangeMode;
   appliedMode?: DetectionRangeMode;
@@ -75,7 +145,29 @@ export type RegionDeviceSyncStatus = "synced" | "pending" | "local_only";
 export interface RegionSyncState {
   fourSidedRange: RegionDeviceSyncStatus;
   regionMcuIo: RegionDeviceSyncStatus;
+  tagConfig: RegionDeviceSyncStatus;
+  customRange: RegionDeviceSyncStatus;
+  learnedRange: RegionDeviceSyncStatus;
   updatedAt?: string;
+}
+
+export type TagEventType = "none" | "boundary" | "approach_away" | "people_counting" | "noise";
+export type TagBoundaryState = "enter" | "exit" | "none";
+export type TagApproachAwayState = "approach" | "away" | "none";
+
+export interface TagRegionRuntime {
+  tagIndex: number;
+  tagType: TagEventType;
+  tagTypeCode: number;
+  ioIndex: number;
+  centerXCm?: number;
+  centerYCm?: number;
+  movingCount?: number;
+  staticCount?: number;
+  boundaryState?: TagBoundaryState;
+  approachAwayState?: TagApproachAwayState;
+  receivedAt: string;
+  dataAvailable: boolean;
 }
 
 export interface RegionOverlay {
@@ -86,6 +178,12 @@ export interface RegionOverlay {
   y: number;
   regionType?: RegionType;
   geometry?: RegionGeometryMeters;
+  tagIndex?: number;
+  tagType?: TagEventType;
+  tagTypeCode?: number;
+  tagDataAvailable?: boolean;
+  tagUpdatedAt?: string;
+  tagTypeMismatch?: boolean;
   movingCount?: number;
   staticCount?: number;
   boundaryState?: string;
@@ -106,6 +204,11 @@ export interface StoredRegionConfigRegion {
   visible: boolean;
 }
 
+export interface RegionViewPreferences {
+  gridVisible: boolean;
+  backgroundVisible: boolean;
+}
+
 export interface StoredRegionConfig {
   version: 2;
   coordinate: RangeBox;
@@ -113,6 +216,7 @@ export interface StoredRegionConfig {
   regions: StoredRegionConfigRegion[];
   detection: DetectionRangeConfig;
   backgroundInstances: BaseMapInstance[];
+  viewPreferences: RegionViewPreferences;
   syncState: RegionSyncState;
 }
 
@@ -196,6 +300,9 @@ export interface MmwaveOverviewDeviceCard {
   coordinate: RangeBox;
   regions: RegionOverlay[];
   targets: TrajectoryPoint[];
+  backgroundInstances: BaseMapInstance[];
+  viewPreferences: RegionViewPreferences;
+  deploymentName?: string;
 }
 
 export interface MmwaveDeviceDetail {
@@ -217,6 +324,9 @@ export interface MmwaveDeviceDetail {
   coordinate: RangeBox;
   regions: RegionOverlay[];
   targets: TrajectoryPoint[];
+  backgroundInstances: BaseMapInstance[];
+  viewPreferences: RegionViewPreferences;
+  deploymentName?: string;
   movingCount: number;
   staticCount: number;
   ioStates: Array<{ id: string; label: string; active: boolean }>;
@@ -226,6 +336,7 @@ export interface MmwaveDeviceDetail {
     canRefresh: boolean;
     canManageRegions: boolean;
   };
+  learnedRange: LearnedRangeRuntime;
 }
 
 export interface MmwaveOverviewResponse {

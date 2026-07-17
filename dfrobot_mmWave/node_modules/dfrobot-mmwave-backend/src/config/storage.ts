@@ -3,6 +3,7 @@ import path from "node:path";
 import type {
   C4004DeviceSettings,
   BaseMapInstance,
+  DeviceLogRetention,
   DetectionRangeConfig,
   RangeBox,
   RegionGeometry,
@@ -69,6 +70,7 @@ export interface StoredMmwaveDevice {
   installInfo?: StoredInstallInfo;
   detectionMode?: DetectionMode;
   deviceSettings?: C4004DeviceSettings;
+  logRetention?: DeviceLogRetention;
   discovery: {
     status: "online" | "offline";
     signal: number;
@@ -93,6 +95,7 @@ export interface StoredDeviceMetaFile {
   installInfo?: StoredInstallInfo;
   detectionMode?: DetectionMode;
   deviceSettings?: C4004DeviceSettings;
+  logRetention?: DeviceLogRetention;
   regionConfig: StoredRegionConfig;
 }
 
@@ -272,6 +275,25 @@ const normalizeDeviceSettings = (value: unknown): C4004DeviceSettings | undefine
   return Object.keys(settings).length ? settings : undefined;
 };
 
+const normalizeLogRetention = (value: unknown): DeviceLogRetention | undefined => {
+  if (!isRecord(value) || !["forever", "limited", "none"].includes(value.mode as string)) {
+    return undefined;
+  }
+  const mode = value.mode as DeviceLogRetention["mode"];
+  const updatedAt = typeof value.updatedAt === "string" && value.updatedAt.trim()
+    ? value.updatedAt
+    : new Date(0).toISOString();
+  if (mode !== "limited") {
+    return { mode, updatedAt };
+  }
+  const parsedValue = typeof value.value === "number" ? value.value : Number(value.value);
+  const unit = value.unit;
+  if (!Number.isInteger(parsedValue) || parsedValue < 1 || !["day", "week", "month", "year"].includes(unit as string)) {
+    return undefined;
+  }
+  return { mode, value: parsedValue, unit: unit as DeviceLogRetention["unit"], updatedAt };
+};
+
 const cloneRangeBox = (box: RangeBox): RangeBox => ({
   xMin: box.xMin,
   xMax: box.xMax,
@@ -308,6 +330,14 @@ const createDefaultDetection = (): DetectionRangeConfig => ({
 const createDefaultSyncState = (): RegionSyncState => ({
   fourSidedRange: "local_only",
   regionMcuIo: "local_only",
+  tagConfig: "local_only",
+  customRange: "local_only",
+  learnedRange: "local_only",
+});
+
+const createDefaultViewPreferences = (): StoredRegionConfig["viewPreferences"] => ({
+  gridVisible: true,
+  backgroundVisible: false,
 });
 
 export const createDefaultRegionConfig = (): StoredRegionConfig => ({
@@ -317,6 +347,7 @@ export const createDefaultRegionConfig = (): StoredRegionConfig => ({
   regions: [],
   detection: createDefaultDetection(),
   backgroundInstances: [],
+  viewPreferences: createDefaultViewPreferences(),
   syncState: createDefaultSyncState(),
 });
 
@@ -431,10 +462,10 @@ const normalizeRegion = (value: unknown): StoredRegionConfigRegion => {
     ? (rawIoIndex as StoredRegionConfigRegion["ioIndex"])
     : 0;
   const rawMcuIo = Math.round(toFiniteNumber(value.mcuIo, -1));
-  if (regionType === "status_detection" && index < 6 && (rawMcuIo < -1 || rawMcuIo > 255)) {
+  if (regionType === "status_detection" && ioIndex !== 0 && (rawMcuIo < -1 || rawMcuIo > 255)) {
     throw new Error("Invalid region config: MCU IO must be between -1 and 255");
   }
-  const mcuIo = regionType === "status_detection" && index < 6
+  const mcuIo = regionType === "status_detection" && ioIndex !== 0
     ? rawMcuIo
     : -1;
 
@@ -484,6 +515,9 @@ const normalizeSyncState = (value: unknown): RegionSyncState => {
   return {
     fourSidedRange: normalizeStatus(record.fourSidedRange),
     regionMcuIo: normalizeStatus(record.regionMcuIo),
+    tagConfig: normalizeStatus(record.tagConfig),
+    customRange: normalizeStatus(record.customRange),
+    learnedRange: normalizeStatus(record.learnedRange),
     updatedAt: typeof record.updatedAt === "string" && record.updatedAt.trim() ? record.updatedAt : undefined,
   };
 };
@@ -511,6 +545,19 @@ export const normalizeRegionConfig = (value: unknown): StoredRegionConfig => {
     throw new Error("Invalid region config: coordinate bounds are invalid");
   }
 
+  const backgroundInstances = (Array.isArray(value.backgroundInstances) ? value.backgroundInstances : [])
+    .map(normalizeBackgroundInstance)
+    .filter((instance): instance is BaseMapInstance => Boolean(instance));
+  const rawPrefs = isRecord(value.viewPreferences) ? value.viewPreferences : null;
+  const hasLegacyVisibleBackground = backgroundInstances.some((instance) => instance.visible);
+  const viewPreferences = {
+    gridVisible: typeof rawPrefs?.gridVisible === "boolean" ? rawPrefs.gridVisible : true,
+    backgroundVisible:
+      typeof rawPrefs?.backgroundVisible === "boolean"
+        ? rawPrefs.backgroundVisible
+        : hasLegacyVisibleBackground,
+  };
+
   return {
     version: 2,
     coordinate,
@@ -522,9 +569,8 @@ export const normalizeRegionConfig = (value: unknown): StoredRegionConfig => {
     },
     regions,
     detection,
-    backgroundInstances: (Array.isArray(value.backgroundInstances) ? value.backgroundInstances : [])
-      .map(normalizeBackgroundInstance)
-      .filter((instance): instance is BaseMapInstance => Boolean(instance)),
+    backgroundInstances,
+    viewPreferences,
     syncState: normalizeSyncState(value.syncState),
   };
 };
@@ -612,6 +658,7 @@ const normalizeMetaFile = (raw: unknown, fallbackId: string): StoredDeviceMetaFi
         ? normalizeDetectionMode(raw.detectionMode)
         : undefined,
     deviceSettings: normalizeDeviceSettings(raw.deviceSettings),
+    logRetention: normalizeLogRetention(raw.logRetention),
     regionConfig: normalizeRegionConfig(raw.regionConfig),
   };
 };
@@ -668,6 +715,7 @@ const combineStoredDevice = (
       installInfo: meta.installInfo,
       detectionMode: meta.detectionMode,
       deviceSettings: meta.deviceSettings,
+      logRetention: meta.logRetention,
       discovery: createDefaultDiscovery(new Date().toISOString()),
       regionConfig: meta.regionConfig,
       lastZoneSnapshot: createEmptyZoneSnapshot(new Date().toISOString()),
@@ -718,6 +766,7 @@ const splitStoredDevice = (
     installInfo: device.installInfo,
     detectionMode: device.detectionMode,
     deviceSettings: device.deviceSettings,
+    logRetention: device.logRetention,
     regionConfig: device.regionConfig,
   },
 });
@@ -747,7 +796,7 @@ export class DeviceStorage {
       }
     }
 
-    return [...devicesById.values()].filter((device) => device.initialized || device.discovery.status === "online").sort((left, right) => {
+    return [...devicesById.values()].sort((left, right) => {
       if (left.initialized !== right.initialized) {
         return left.initialized ? -1 : 1;
       }
@@ -776,10 +825,6 @@ export class DeviceStorage {
     for (const [index, device] of devices.entries()) {
       const id = toStableDeviceId(device);
       const binding = this.findBindingForDiscoveredDevice(registry, id);
-
-      if (!binding && device.status !== "online") {
-        continue;
-      }
 
       const existing = existingById.get(binding?.id ?? id) ?? existingById.get(id);
       const nextDevice = {
@@ -945,6 +990,23 @@ export class DeviceStorage {
         ...current.deviceSettings,
         ...normalizedSettings,
       },
+      discovery: {
+        ...current.discovery,
+        lastUpdated: new Date().toISOString(),
+      },
+    };
+    this.saveDevice(nextDevice);
+    return nextDevice;
+  }
+
+  updateLogRetention(id: string, logRetention: DeviceLogRetention): StoredMmwaveDevice {
+    const current = this.getDevice(id);
+    if (!current) {
+      throw new Error("Device not found");
+    }
+    const nextDevice: StoredMmwaveDevice = {
+      ...current,
+      logRetention,
       discovery: {
         ...current.discovery,
         lastUpdated: new Date().toISOString(),

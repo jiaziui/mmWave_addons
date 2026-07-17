@@ -6,6 +6,7 @@ import type {
   MmwaveDeviceDetail,
   MmwaveOverviewDeviceCard,
   RangeBox,
+  TagRegionRuntime,
   StoredRegionConfig,
   StoredZoneSnapshot,
   TrajectorySnapshot,
@@ -53,6 +54,7 @@ export interface ProfileRuntimeStateUpdates {
 
 export interface ProfileCardRuntime {
   trajectory: TrajectorySnapshot | null;
+  tagRegions: Map<number, TagRegionRuntime>;
   mqttConnected: boolean;
 }
 
@@ -64,6 +66,11 @@ export interface MmwaveProfileAdapter {
   capabilities: ProfileCapabilities;
   mqttTopics: ProfileMqttTopics;
   runtimeSupported: boolean;
+  mapEntityStates?(
+    device: StoredMmwaveDevice,
+    statesById: Map<string, HaEntityState>,
+    entityRegistryEntries: readonly HaEntityRegistryEntry[],
+  ): Map<string, HaEntityState>;
   resolveDeviceOnline?(
     device: StoredMmwaveDevice,
     statesById: Map<string, HaEntityState>,

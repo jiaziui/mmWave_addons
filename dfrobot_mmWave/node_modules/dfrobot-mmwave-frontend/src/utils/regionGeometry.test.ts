@@ -43,6 +43,16 @@ describe("region geometry", () => {
     expect(validateRegionDefinition({ ...region(1), geometry: { shape: "circle", centerXCm: 0, centerYCm: 0, radiusCm: 5 } }, [])).toContain("半径");
   });
 
+  it("binds MCU IO by sensor IO and rejects duplicate IO bindings", () => {
+    const bound = { ...region(0), ioIndex: 3 as const, mcuIo: 12 };
+    const normalized = normalizeRegionDefinition({ ...region(7), ioIndex: 0, mcuIo: 15 });
+
+    expect(normalized.mcuIo).toBe(-1);
+    expect(validateRegionDefinition({ ...region(1), ioIndex: 3, mcuIo: 13 }, [bound])).toBe(
+      "IO3 已被其他状态检测区域使用",
+    );
+  });
+
   it("converts viewport center into the configured world center", () => {
     expect(viewportPointToWorld(500, 300, 0, 0, {
       coordinateWidthCm: 1000,

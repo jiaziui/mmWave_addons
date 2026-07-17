@@ -86,7 +86,7 @@ describe("RegionConfig V2", () => {
         label: "区域",
         regionType: "status_detection",
         geometry: { shape: "rect", centerXCm: 0, centerYCm: 100, widthCm: 100, heightCm: 100 },
-        ioIndex: 0,
+        ioIndex: 2,
         mcuIo: 256,
         enabled: true,
         visible: true,

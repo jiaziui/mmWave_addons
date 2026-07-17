@@ -59,7 +59,12 @@ export function OverviewPage({
             {devices.map((device) => (
               <button className="device-card" type="button" key={device.id} onClick={() => onOpenDevice(device.id)}>
                 <div className="device-card-head">
-                  <div><strong>{device.name}</strong></div>
+                  <div>
+                    <strong>{device.name}</strong>
+                    <span className="device-card-deployment">
+                      {device.deploymentName?.trim() || "未设置部署位置"}
+                    </span>
+                  </div>
                   <small>{device.online ? "ONLINE" : "OFFLINE"}</small>
                 </div>
                 <RadarCanvas
@@ -68,6 +73,8 @@ export function OverviewPage({
                   detection={device.detection}
                   regions={device.regions}
                   targets={device.targets}
+                  backgroundInstances={device.backgroundInstances}
+                  viewPreferences={device.viewPreferences}
                 />
                 <div className="device-card-foot">
                   <span>总人数 {device.peopleCount}</span>

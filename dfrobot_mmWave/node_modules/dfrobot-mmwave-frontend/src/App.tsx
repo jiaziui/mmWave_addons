@@ -4,7 +4,6 @@ import {
   discoverDevices,
   fetchDeviceDetail,
   fetchDevices,
-  fetchMeta,
   fetchOverview,
   initializeDevice as submitInitializeDevice,
   isLocalMockMode,
@@ -12,18 +11,21 @@ import {
   resetDevice,
   unbindDevice,
   type DetectionMode,
-  type MetaConfig,
   type MmwaveDeviceDetail,
   type MmwaveOverviewDeviceCard,
   type MmwaveOverviewMetrics,
   type StoredMmwaveDevice,
+  type DeviceLogEntry,
 } from "./api/client";
 import { RadarCanvas } from "./components/RadarCanvas";
+import { DeviceLogPanel } from "./components/DeviceLogPanel";
 import { OverviewPage } from "./pages/OverviewPage";
 import { RegionManagementPage } from "./pages/RegionManagementPage";
+import { useMmwaveLiveRefresh } from "./hooks/useMmwaveLiveRefresh";
 
 type View = "overview" | "detail" | "device-management" | "region-management";
 type DeviceNoMode = "auto" | "custom";
+type DetailPanelTab = "basics" | "logs";
 
 type InitializeWizardState = {
   deviceId: string;
@@ -62,7 +64,6 @@ const detectionModeLabels: Record<DetectionMode, { title: string; description: s
 function App() {
   const [entered, setEntered] = useState(false);
   const [view, setView] = useState<View>("overview");
-  const [meta, setMeta] = useState<MetaConfig | null>(null);
   const [devices, setDevices] = useState<StoredMmwaveDevice[]>([]);
   const [metrics, setMetrics] = useState<MmwaveOverviewMetrics>({
     deviceCount: 0,
@@ -74,21 +75,22 @@ function App() {
   const [overviewStale, setOverviewStale] = useState(false);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
   const [detail, setDetail] = useState<MmwaveDeviceDetail | null>(null);
+  const [detailPanelTab, setDetailPanelTab] = useState<DetailPanelTab>("basics");
+  const [deviceLogRefreshToken, setDeviceLogRefreshToken] = useState(0);
+  const [memoryLogEntries, setMemoryLogEntries] = useState<DeviceLogEntry[]>([]);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string>("");
   const [error, setError] = useState<string>("");
   const [initializeWizard, setInitializeWizard] = useState<InitializeWizardState | null>(null);
   const overviewLoadingRef = useRef(false);
   const detailLoadingRef = useRef(false);
+  const overviewRefreshPendingRef = useRef(false);
+  const detailRefreshPendingRef = useRef(false);
 
   const selectedDevice = useMemo(
     () => devices.find((device) => device.id === selectedDeviceId) ?? null,
     [devices, selectedDeviceId],
   );
-
-  const loadMeta = async () => {
-    setMeta(await fetchMeta());
-  };
 
   const loadDevices = async () => {
     const response = await fetchDevices();
@@ -107,11 +109,56 @@ function App() {
     setDetail(response.detail);
   };
 
+  const refreshOverview = async () => {
+    if (document.hidden) {
+      return;
+    }
+    if (overviewLoadingRef.current) {
+      overviewRefreshPendingRef.current = true;
+      return;
+    }
+    overviewLoadingRef.current = true;
+    try {
+      await loadOverview();
+      setOverviewStale(false);
+    } catch {
+      setOverviewStale(true);
+    } finally {
+      overviewLoadingRef.current = false;
+      if (overviewRefreshPendingRef.current) {
+        overviewRefreshPendingRef.current = false;
+        void refreshOverview();
+      }
+    }
+  };
+
+  const refreshDetail = async (deviceId: string) => {
+    if (document.hidden) {
+      return;
+    }
+    if (detailLoadingRef.current) {
+      detailRefreshPendingRef.current = true;
+      return;
+    }
+    detailLoadingRef.current = true;
+    try {
+      await loadDetail(deviceId);
+    } catch {
+      // Keep the last successful detail while the device is temporarily unavailable.
+    } finally {
+      detailLoadingRef.current = false;
+      if (detailRefreshPendingRef.current) {
+        detailRefreshPendingRef.current = false;
+        void refreshDetail(deviceId);
+      }
+    }
+  };
+
   const bootstrap = async () => {
     try {
       setBusy(true);
       setError("");
-      await Promise.all([loadMeta(), loadDevices(), loadOverview()]);
+      await Promise.all([loadDevices(), loadOverview()]);
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "初始化失败");
     } finally {
@@ -127,22 +174,8 @@ function App() {
     if (!entered || view !== "overview") {
       return;
     }
-
-    const refresh = async () => {
-      if (overviewLoadingRef.current || document.hidden) {
-        return;
-      }
-      overviewLoadingRef.current = true;
-      try {
-        await loadOverview();
-      } catch {
-        setOverviewStale(true);
-      } finally {
-        overviewLoadingRef.current = false;
-      }
-    };
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), 2000);
+    void refreshOverview();
+    const timer = window.setInterval(() => void refreshOverview(), 2000);
 
     return () => {
       window.clearInterval(timer);
@@ -153,26 +186,38 @@ function App() {
     if (!entered || view !== "detail" || !selectedDeviceId) {
       return;
     }
-
-    const refresh = async () => {
-      if (detailLoadingRef.current || document.hidden) {
-        return;
-      }
-      detailLoadingRef.current = true;
-      try {
-        await loadDetail(selectedDeviceId);
-      } catch {
-        // Keep the last successful detail while the device is temporarily unavailable.
-      } finally {
-        detailLoadingRef.current = false;
-      }
-    };
-    const timer = window.setInterval(() => void refresh(), 2000);
+    void refreshDetail(selectedDeviceId);
+    const timer = window.setInterval(() => void refreshDetail(selectedDeviceId), 2000);
 
     return () => {
       window.clearInterval(timer);
     };
   }, [entered, view, selectedDeviceId]);
+
+  useMmwaveLiveRefresh(
+    view === "overview"
+      ? { scope: "overview" }
+      : view === "detail" && selectedDeviceId
+        ? { scope: "device", deviceId: selectedDeviceId }
+        : null,
+    (subscription) => {
+      if (subscription.scope === "overview") {
+        void refreshOverview();
+        return;
+      }
+      if (subscription.scope === "device") {
+        void refreshDetail(subscription.deviceId);
+        setDeviceLogRefreshToken((value) => value + 1);
+      }
+    },
+    (nextError) => setError(nextError),
+    (_deviceId, entry, persisted) => {
+      if (!persisted) {
+        setMemoryLogEntries((entries) => [entry, ...entries].slice(0, 10));
+      }
+      setDeviceLogRefreshToken((value) => value + 1);
+    },
+  );
 
   useEffect(() => {
     if (!selectedDeviceId || view !== "detail") {
@@ -182,6 +227,10 @@ function App() {
       setError(nextError instanceof Error ? nextError.message : "设备详情加载失败");
     });
   }, [selectedDeviceId, view]);
+
+  useEffect(() => {
+    setMemoryLogEntries([]);
+  }, [selectedDeviceId]);
 
   const handleDiscover = async () => {
     try {
@@ -202,8 +251,25 @@ function App() {
     }
   };
 
+  const handleRefreshDevices = async () => {
+    try {
+      setBusy(true);
+      setError("");
+      setMessage("");
+      const response = await fetchDevices();
+      setDevices(response.devices);
+      setMessage("设备状态已刷新");
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "刷新设备状态失败");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleOpenDevice = (deviceId: string) => {
     setSelectedDeviceId(deviceId);
+    setDetailPanelTab("basics");
+    setDeviceLogRefreshToken(0);
     setView("detail");
     setError("");
   };
@@ -250,7 +316,7 @@ function App() {
 
   const getDeviceTypeLabel = (device: StoredMmwaveDevice): string => {
     if (device.profileId === "c4004") {
-      return "dfrobot_c4004";
+      return "c4004";
     }
     return device.model.trim().toLowerCase().replace(/\s+/g, "_");
   };
@@ -294,7 +360,7 @@ function App() {
     setError("");
     setMessage("");
     const confirmed = window.confirm(
-      `确认取消绑定设备 ${device.name}？这会删除该设备的本地配置、区域配置和快照缓存。`,
+      `确认取消绑定设备 ${device.name}？这会删除该设备的本地配置、区域配置、事件日志和快照缓存。`,
     );
     if (!confirmed) {
       return;
@@ -445,10 +511,6 @@ function App() {
         ))}
       </nav>
       <div className="sidebar-bottom">
-        <div className="sidebar-foot">
-          <span>HA: {meta?.linked ? "Linked" : "Unlinked"}</span>
-          <span>MQTT: {meta?.mqttConnected ? "Live" : meta?.mqttConfigured ? "Configured" : "Disabled"}</span>
-        </div>
         {message ? <div className="notice notice-info sidebar-notice">{message}</div> : null}
         {error ? <div className="notice notice-error sidebar-notice">{error}</div> : null}
       </div>
@@ -461,11 +523,6 @@ function App() {
         <div>
           <p className="eyebrow">Device Detail</p>
           <h2>{detail?.name ?? "设备详情"}</h2>
-          {detail ? (
-            <span className="detail-meta">
-              {detail.deviceId} / {detail.online ? "在线" : "离线"} / {detail.firmwareVersion ?? "固件未知"}
-            </span>
-          ) : null}
         </div>
         <div className="page-actions">
           <button type="button" className="ghost-button" onClick={() => setView("region-management")}>
@@ -489,6 +546,8 @@ function App() {
               detection={detail.detection}
               regions={detail.regions}
               targets={detail.targets}
+              backgroundInstances={detail.backgroundInstances}
+              viewPreferences={detail.viewPreferences}
               large
             />
             {!detail.trajectoryAvailable ? <div className="degraded-banner">未接收到 MQTT 轨迹点，当前只显示范围框与区域标签。</div> : null}
@@ -520,15 +579,22 @@ function App() {
             </section>
 
             <section className="panel compact-panel">
-              <div className="section-title">核心参数</div>
-              <div className="basic-list">
-                {detail.basics.map((item) => (
-                  <div key={item.key} className="basic-item">
-                    <span>{item.label}</span>
-                    <strong>{item.value}</strong>
-                  </div>
-                ))}
+              <div className="detail-panel-tabs" role="tablist" aria-label="设备信息">
+                <button type="button" role="tab" aria-selected={detailPanelTab === "basics"} className={detailPanelTab === "basics" ? "active" : ""} onClick={() => setDetailPanelTab("basics")}>核心参数</button>
+                <button type="button" role="tab" aria-selected={detailPanelTab === "logs"} className={detailPanelTab === "logs" ? "active" : ""} onClick={() => setDetailPanelTab("logs")}>设备日志</button>
               </div>
+              {detailPanelTab === "basics" ? <div className="basic-list">
+                {detail.basics.map((item) => <div key={item.key} className="basic-item">
+                  <span>{item.label}</span>
+                  <strong>{item.value}</strong>
+                </div>)}
+              </div> : <DeviceLogPanel
+                deviceId={detail.id}
+                online={detail.online}
+                refreshToken={deviceLogRefreshToken}
+                memoryEntries={memoryLogEntries}
+                onError={setError}
+              />}
             </section>
           </div>
         </div>
@@ -549,6 +615,9 @@ function App() {
           <h2>设备管理</h2>
         </div>
         <div className="page-actions">
+          <button type="button" className="ghost-button" onClick={() => void handleRefreshDevices()} disabled={busy}>
+            刷新设备
+          </button>
           <button type="button" className="primary-button" onClick={() => void handleDiscover()} disabled={busy}>
             扫描设备
           </button>
@@ -594,7 +663,7 @@ function App() {
               <tbody>
                 {deviceManagementDevices.map((device) => {
                   const status = getDeviceUiStatus(device);
-                  const canViewDetail = device.initialized && status === "ONLINE";
+                  const canViewDetail = device.initialized;
                   const canDelete = device.initialized;
                   const canInitialize = !device.initialized;
 
@@ -845,4 +914,3 @@ function App() {
 }
 
 export default App;
-

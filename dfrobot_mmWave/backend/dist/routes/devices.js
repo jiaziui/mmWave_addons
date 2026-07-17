@@ -45,7 +45,7 @@ const toConfigStatus = (message) => {
     if (message === "Device profile does not support config yet") {
         return 400;
     }
-    if (message.startsWith("Invalid region config") || message === "No valid config update provided") {
+    if (message.startsWith("Invalid region config") || message.startsWith("Invalid log retention") || message === "No valid config update provided") {
         return 400;
     }
     return 502;
@@ -69,6 +69,25 @@ const parseOptionalBoolean = (value) => {
 const parseOptionalNumber = (value) => {
     const parsed = typeof value === "number" ? value : Number(value);
     return Number.isFinite(parsed) ? parsed : undefined;
+};
+const parseInteger = (value, fallback) => {
+    if (value === undefined && fallback !== undefined) {
+        return fallback;
+    }
+    const parsed = typeof value === "number" ? value : Number(value);
+    if (!Number.isInteger(parsed)) {
+        throw new Error("Invalid log query parameter");
+    }
+    return parsed;
+};
+const toLogStatus = (message) => {
+    if (message === "Device not found") {
+        return 404;
+    }
+    if (message.startsWith("Invalid ")) {
+        return 400;
+    }
+    return 502;
 };
 const parseDeviceSettings = (value) => {
     if (!isRecord(value)) {
@@ -158,24 +177,53 @@ const createMmwaveRouter = (service) => {
             res.status(toConfigStatus(message)).json({ ok: false, error: message });
         }
     });
+    router.get("/devices/:deviceId/logs/calendar", (req, res) => {
+        try {
+            const year = parseInteger(req.query.year);
+            const month = parseInteger(req.query.month);
+            res.json({ ok: true, ...service.getDeviceLogCalendar(req.params.deviceId, year, month) });
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : "Failed to load device log calendar";
+            res.status(toLogStatus(message)).json({ ok: false, error: message });
+        }
+    });
+    router.get("/devices/:deviceId/logs", (req, res) => {
+        try {
+            const date = typeof req.query.date === "string" ? req.query.date : "";
+            const page = parseInteger(req.query.page, 1);
+            const pageSize = parseInteger(req.query.pageSize, 50);
+            res.json({ ok: true, ...service.getDeviceLogs(req.params.deviceId, date, page, pageSize) });
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : "Failed to load device logs";
+            res.status(toLogStatus(message)).json({ ok: false, error: message });
+        }
+    });
     router.put("/devices/:deviceId/config", async (req, res) => {
         try {
-            const hasStructuredBody = isRecord(req.body) && ("deviceSettings" in req.body || "settings" in req.body || "regionConfig" in req.body || "apply" in req.body);
+            const hasStructuredBody = isRecord(req.body) && ("deviceSettings" in req.body || "settings" in req.body || "regionConfig" in req.body || "logRetention" in req.body || "apply" in req.body);
             const rawSettings = hasStructuredBody ? req.body.deviceSettings ?? req.body.settings : req.body;
             const settings = parseDeviceSettings(rawSettings);
             const regionConfig = hasStructuredBody ? req.body.regionConfig : undefined;
-            if (!settings && regionConfig === undefined) {
-                res.status(400).json({ ok: false, error: "No valid config update provided" });
-                return;
-            }
+            const logRetention = hasStructuredBody && isRecord(req.body.logRetention)
+                ? req.body.logRetention
+                : undefined;
             const apply = isRecord(req.body?.apply)
                 ? {
                     fourSidedRange: req.body.apply.fourSidedRange === true,
                     regionMcuIo: req.body.apply.regionMcuIo === true,
+                    tagConfig: req.body.apply.tagConfig === true,
+                    customRange: req.body.apply.customRange === true,
                 }
                 : undefined;
+            if (!settings && !logRetention && regionConfig === undefined && !apply?.tagConfig && !apply?.customRange) {
+                res.status(400).json({ ok: false, error: "No valid config update provided" });
+                return;
+            }
             const result = await service.updateDeviceConfig(req.params.deviceId, {
                 deviceSettings: settings ?? undefined,
+                logRetention: logRetention,
                 regionConfig,
                 apply,
             });

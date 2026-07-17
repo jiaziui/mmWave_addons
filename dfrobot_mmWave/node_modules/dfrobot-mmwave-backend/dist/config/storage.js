@@ -131,6 +131,24 @@ const normalizeDeviceSettings = (value) => {
     }
     return Object.keys(settings).length ? settings : undefined;
 };
+const normalizeLogRetention = (value) => {
+    if (!isRecord(value) || !["forever", "limited", "none"].includes(value.mode)) {
+        return undefined;
+    }
+    const mode = value.mode;
+    const updatedAt = typeof value.updatedAt === "string" && value.updatedAt.trim()
+        ? value.updatedAt
+        : new Date(0).toISOString();
+    if (mode !== "limited") {
+        return { mode, updatedAt };
+    }
+    const parsedValue = typeof value.value === "number" ? value.value : Number(value.value);
+    const unit = value.unit;
+    if (!Number.isInteger(parsedValue) || parsedValue < 1 || !["day", "week", "month", "year"].includes(unit)) {
+        return undefined;
+    }
+    return { mode, value: parsedValue, unit: unit, updatedAt };
+};
 const cloneRangeBox = (box) => ({
     xMin: box.xMin,
     xMax: box.xMax,
@@ -164,6 +182,12 @@ const createDefaultDetection = () => ({
 const createDefaultSyncState = () => ({
     fourSidedRange: "local_only",
     regionMcuIo: "local_only",
+    tagConfig: "local_only",
+    customRange: "local_only",
+});
+const createDefaultViewPreferences = () => ({
+    gridVisible: true,
+    backgroundVisible: false,
 });
 const createDefaultRegionConfig = () => ({
     version: 2,
@@ -172,6 +196,7 @@ const createDefaultRegionConfig = () => ({
     regions: [],
     detection: createDefaultDetection(),
     backgroundInstances: [],
+    viewPreferences: createDefaultViewPreferences(),
     syncState: createDefaultSyncState(),
 });
 exports.createDefaultRegionConfig = createDefaultRegionConfig;
@@ -277,10 +302,10 @@ const normalizeRegion = (value) => {
         ? rawIoIndex
         : 0;
     const rawMcuIo = Math.round(toFiniteNumber(value.mcuIo, -1));
-    if (regionType === "status_detection" && index < 6 && (rawMcuIo < -1 || rawMcuIo > 255)) {
+    if (regionType === "status_detection" && ioIndex !== 0 && (rawMcuIo < -1 || rawMcuIo > 255)) {
         throw new Error("Invalid region config: MCU IO must be between -1 and 255");
     }
-    const mcuIo = regionType === "status_detection" && index < 6
+    const mcuIo = regionType === "status_detection" && ioIndex !== 0
         ? rawMcuIo
         : -1;
     return {
@@ -326,6 +351,8 @@ const normalizeSyncState = (value) => {
     return {
         fourSidedRange: normalizeStatus(record.fourSidedRange),
         regionMcuIo: normalizeStatus(record.regionMcuIo),
+        tagConfig: normalizeStatus(record.tagConfig),
+        customRange: normalizeStatus(record.customRange),
         updatedAt: typeof record.updatedAt === "string" && record.updatedAt.trim() ? record.updatedAt : undefined,
     };
 };
@@ -351,6 +378,17 @@ const normalizeRegionConfig = (value) => {
     if (coordinate.xMin >= coordinate.xMax || coordinate.yMin >= coordinate.yMax) {
         throw new Error("Invalid region config: coordinate bounds are invalid");
     }
+    const backgroundInstances = (Array.isArray(value.backgroundInstances) ? value.backgroundInstances : [])
+        .map(normalizeBackgroundInstance)
+        .filter((instance) => Boolean(instance));
+    const rawPrefs = isRecord(value.viewPreferences) ? value.viewPreferences : null;
+    const hasLegacyVisibleBackground = backgroundInstances.some((instance) => instance.visible);
+    const viewPreferences = {
+        gridVisible: typeof rawPrefs?.gridVisible === "boolean" ? rawPrefs.gridVisible : true,
+        backgroundVisible: typeof rawPrefs?.backgroundVisible === "boolean"
+            ? rawPrefs.backgroundVisible
+            : hasLegacyVisibleBackground,
+    };
     return {
         version: 2,
         coordinate,
@@ -362,9 +400,8 @@ const normalizeRegionConfig = (value) => {
         },
         regions,
         detection,
-        backgroundInstances: (Array.isArray(value.backgroundInstances) ? value.backgroundInstances : [])
-            .map(normalizeBackgroundInstance)
-            .filter((instance) => Boolean(instance)),
+        backgroundInstances,
+        viewPreferences,
         syncState: normalizeSyncState(value.syncState),
     };
 };
@@ -440,6 +477,7 @@ const normalizeMetaFile = (raw, fallbackId) => {
             ? normalizeDetectionMode(raw.detectionMode)
             : undefined,
         deviceSettings: normalizeDeviceSettings(raw.deviceSettings),
+        logRetention: normalizeLogRetention(raw.logRetention),
         regionConfig: (0, exports.normalizeRegionConfig)(raw.regionConfig),
     };
 };
@@ -485,6 +523,7 @@ const combineStoredDevice = (meta, binding) => applyBindingToDevice({
     installInfo: meta.installInfo,
     detectionMode: meta.detectionMode,
     deviceSettings: meta.deviceSettings,
+    logRetention: meta.logRetention,
     discovery: createDefaultDiscovery(new Date().toISOString()),
     regionConfig: meta.regionConfig,
     lastZoneSnapshot: createEmptyZoneSnapshot(new Date().toISOString()),
@@ -527,6 +566,7 @@ const splitStoredDevice = (device) => ({
         installInfo: device.installInfo,
         detectionMode: device.detectionMode,
         deviceSettings: device.deviceSettings,
+        logRetention: device.logRetention,
         regionConfig: device.regionConfig,
     },
 });
@@ -553,7 +593,7 @@ class DeviceStorage {
                 devicesById.set(binding.id, createDeviceFromBinding(binding));
             }
         }
-        return [...devicesById.values()].filter((device) => device.initialized || device.discovery.status === "online").sort((left, right) => {
+        return [...devicesById.values()].sort((left, right) => {
             if (left.initialized !== right.initialized) {
                 return left.initialized ? -1 : 1;
             }
@@ -579,9 +619,6 @@ class DeviceStorage {
         for (const [index, device] of devices.entries()) {
             const id = toStableDeviceId(device);
             const binding = this.findBindingForDiscoveredDevice(registry, id);
-            if (!binding && device.status !== "online") {
-                continue;
-            }
             const existing = existingById.get(binding?.id ?? id) ?? existingById.get(id);
             const nextDevice = {
                 id,
@@ -728,6 +765,22 @@ class DeviceStorage {
                 ...current.deviceSettings,
                 ...normalizedSettings,
             },
+            discovery: {
+                ...current.discovery,
+                lastUpdated: new Date().toISOString(),
+            },
+        };
+        this.saveDevice(nextDevice);
+        return nextDevice;
+    }
+    updateLogRetention(id, logRetention) {
+        const current = this.getDevice(id);
+        if (!current) {
+            throw new Error("Device not found");
+        }
+        const nextDevice = {
+            ...current,
+            logRetention,
             discovery: {
                 ...current.discovery,
                 lastUpdated: new Date().toISOString(),

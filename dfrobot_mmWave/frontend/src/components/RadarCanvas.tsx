@@ -1,19 +1,29 @@
 import type {
+  BaseMapInstance,
   DetectionRangeConfig,
   RangeBox,
   RegionOverlay,
+  RegionViewPreferences,
   TrajectoryPoint,
 } from "../api/client";
 import deviceIcon from "../../resource/device_c4004.svg";
+import { resolveBaseMapSourceUrl } from "../utils/baseMapAssets";
 
 const X_MIN = -5;
 const X_MAX = 5;
-const Y_MIN = -1;
-const Y_MAX = 9;
+const Y_MIN = -0.5;
+const Y_MAX = 8.5;
 const UNIT_X = 100 / (X_MAX - X_MIN);
 const UNIT_Y = 100 / (Y_MAX - Y_MIN);
 const ORIGIN_X = -X_MIN * UNIT_X;
 const ORIGIN_Y = Y_MAX * UNIT_Y;
+
+const X_TICKS = Array.from({ length: X_MAX - X_MIN + 1 }, (_, index) => X_MIN + index);
+/** Integer Y ticks only; world range stays -0.5..8.5 but endpoint labels are hidden. */
+const Y_TICKS = Array.from(
+  { length: Math.floor(Y_MAX) - Math.ceil(Y_MIN) + 1 },
+  (_, index) => Math.ceil(Y_MIN) + index,
+);
 
 const REGION_COLORS = {
   status_detection: "#FFA94D",
@@ -24,6 +34,12 @@ const REGION_COLORS = {
 } as const;
 
 const liveLabel = (region: RegionOverlay): string => {
+  if (region.regionType === "noise" || region.regionType === "empty_tag") {
+    return "";
+  }
+  if (region.tagDataAvailable === false) {
+    return "等待标签事件";
+  }
   if (region.regionType === "status_detection") {
     return `运动 ${region.movingCount ?? 0}  静止 ${region.staticCount ?? 0}`;
   }
@@ -36,11 +52,21 @@ const liveLabel = (region: RegionOverlay): string => {
   return "";
 };
 
+const estimateRadarLabelWidth = (text: string, charUnits: number, padding: number) => {
+  let units = 0;
+  for (const char of text) {
+    units += /[\u3400-\u9FFF\uF900-\uFAFF\u3000-\u303F\uFF00-\uFFEF]/.test(char) ? 1 : 0.55;
+  }
+  return units * charUnits + padding;
+};
+
 export function RadarCanvas({
   rangeBox,
   detection,
   regions,
   targets,
+  backgroundInstances = [],
+  viewPreferences,
   large = false,
 }: {
   coordinate: RangeBox;
@@ -48,6 +74,8 @@ export function RadarCanvas({
   detection?: DetectionRangeConfig;
   regions: RegionOverlay[];
   targets: TrajectoryPoint[];
+  backgroundInstances?: BaseMapInstance[];
+  viewPreferences?: RegionViewPreferences;
   large?: boolean;
 }) {
   const tx = (x: number) => ORIGIN_X + x * UNIT_X;
@@ -70,26 +98,61 @@ export function RadarCanvas({
     ? polygonSource.map((point) => `${tx(point.x / 100)},${ty(point.y / 100)}`).join(" ")
     : "";
   const deviceSize = large ? 11 : 9;
+  const hasVisibleBackground = backgroundInstances.some((instance) => instance.visible);
+  const gridVisible = viewPreferences?.gridVisible ?? true;
+  const backgroundVisible = viewPreferences?.backgroundVisible ?? hasVisibleBackground;
+  const visibleBackgrounds = backgroundVisible
+    ? [...backgroundInstances]
+        .filter((instance) => instance.visible)
+        .sort((left, right) => left.zIndex - right.zIndex)
+    : [];
 
   return (
     <svg className={large ? "radar-canvas radar-canvas-large" : "radar-canvas"} viewBox="0 0 100 100" preserveAspectRatio="none">
-      {Array.from({ length: X_MAX - X_MIN + 1 }, (_, index) => X_MIN + index).map((x) => (
-        <line key={`grid-x-${x}`} className="radar-grid-line" x1={tx(x)} x2={tx(x)} y1="0" y2="100" />
-      ))}
-      {Array.from({ length: Y_MAX - Y_MIN + 1 }, (_, index) => Y_MIN + index).map((y) => (
-        <line key={`grid-y-${y}`} className="radar-grid-line" x1="0" x2="100" y1={ty(y)} y2={ty(y)} />
-      ))}
-      <line className="radar-axis-line" x1="0" x2="100" y1={ORIGIN_Y} y2={ORIGIN_Y} />
-      <line className="radar-axis-line" x1={ORIGIN_X} x2={ORIGIN_X} y1="0" y2="100" />
-      {Array.from({ length: X_MAX - X_MIN + 1 }, (_, index) => X_MIN + index)
-        .filter((x) => x !== 0)
-        .map((x) => <text key={`tick-x-${x}`} className="radar-tick-label" x={tx(x)} y={Math.min(98.8, ORIGIN_Y + 2.2)} textAnchor="middle">{x}</text>)}
-      {Array.from({ length: Y_MAX - Y_MIN + 1 }, (_, index) => Y_MIN + index)
-        .filter((y) => y !== 0)
-        .map((y) => <text key={`tick-y-${y}`} className="radar-tick-label" x={Math.max(1.6, ORIGIN_X - 1.6)} y={ty(y) + 0.7} textAnchor="end">{y}</text>)}
-      <text className="radar-tick-label" x={ORIGIN_X + 1.8} y={ORIGIN_Y + 2.2}>0</text>
-      <text className="radar-tick-label" x="97.5" y={ORIGIN_Y - 1.2} textAnchor="end">m</text>
-      <text className="radar-tick-label" x={ORIGIN_X + 1.6} y="2.8">m</text>
+      {gridVisible ? (
+        <>
+          {X_TICKS.map((x) => (
+            <line key={`grid-x-${x}`} className="radar-grid-line" x1={tx(x)} x2={tx(x)} y1="0" y2="100" />
+          ))}
+          {Y_TICKS.map((y) => (
+            <line key={`grid-y-${y}`} className="radar-grid-line" x1="0" x2="100" y1={ty(y)} y2={ty(y)} />
+          ))}
+        </>
+      ) : null}
+
+      {visibleBackgrounds.map((instance) => {
+        const href = resolveBaseMapSourceUrl(instance.sourceType, instance.sourceId);
+        if (!href) return null;
+        return (
+          <image
+            key={instance.id}
+            className="radar-base-map"
+            href={href}
+            x={tx(instance.xCm / 100)}
+            y={ty((instance.yCm + instance.heightCm) / 100)}
+            width={(instance.widthCm / 100) * UNIT_X}
+            height={(instance.heightCm / 100) * UNIT_Y}
+            opacity={0.45}
+            preserveAspectRatio="none"
+          />
+        );
+      })}
+
+      {gridVisible ? (
+        <>
+          <line className="radar-axis-line" x1="0" x2="100" y1={ORIGIN_Y} y2={ORIGIN_Y} />
+          <line className="radar-axis-line" x1={ORIGIN_X} x2={ORIGIN_X} y1="0" y2="100" />
+          {X_TICKS
+            .filter((x) => x !== 0)
+            .map((x) => <text key={`tick-x-${x}`} className="radar-tick-label" x={tx(x)} y={Math.min(98.8, ORIGIN_Y + 2.2)} textAnchor="middle">{x}</text>)}
+          {Y_TICKS
+            .filter((y) => y !== 0)
+            .map((y) => <text key={`tick-y-${y}`} className="radar-tick-label" x={Math.max(1.6, ORIGIN_X - 1.6)} y={ty(y) + 0.7} textAnchor="end">{y}</text>)}
+          <text className="radar-tick-label" x={ORIGIN_X + 1.8} y={ORIGIN_Y + 2.2}>0</text>
+          <text className="radar-tick-label" x="97.5" y={ORIGIN_Y - 1.2} textAnchor="end">m</text>
+          <text className="radar-tick-label" x={ORIGIN_X + 1.6} y="2.8">m</text>
+        </>
+      ) : null}
 
       {polygonPoints ? (
         <>
@@ -121,8 +184,8 @@ export function RadarCanvas({
         const radius = isCircle ? geometry.radius * UNIT_X : 0;
         const labelX = isCircle ? shapeX - radius + 0.8 : shapeX + 0.8;
         const labelY = isCircle ? shapeY - radius + 0.8 : shapeY + 0.8;
-        const nameWidth = Math.max(12, region.label.length * 2.4 + 2.5);
-        const infoWidth = Math.max(10, info.length * 1.7 + 2.5);
+        const nameWidth = Math.max(12, estimateRadarLabelWidth(region.label, 2.5, 2.8));
+        const infoWidth = Math.max(10, estimateRadarLabelWidth(info, 2.35, 2.8));
 
         return (
           <g key={region.id} opacity={opacity}>

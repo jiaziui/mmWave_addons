@@ -47,7 +47,7 @@ One-line boundary:
 Communication model:
 
 - REST for initial page data and actions
-- WebSocket for periodic live refresh
+- WebSocket for event-triggered live refresh, with polling as fallback
 - MQTT for high-frequency trajectory payloads
 
 ## 3. Folder Responsibilities
@@ -339,11 +339,12 @@ Current subscription model:
 - overview scope
 - single-device detail scope
 
-Publish interval:
+Push behavior:
 
-- every 2 seconds after subscription
-
-Current WebSocket is a periodic push model, not a pure event-stream model.
+- The backend subscribes to Home Assistant `state_changed` events.
+- Changes to `zone_1_presence` through `zone_6_presence` are routed by HA `device_id`.
+- The backend immediately sends a refresh message to the matching frontend device scope and the overview scope.
+- Frontend polling remains at 2 seconds as a fallback for reconnects and missed events.
 
 ## 11. Current MQTT Subscription Rule
 

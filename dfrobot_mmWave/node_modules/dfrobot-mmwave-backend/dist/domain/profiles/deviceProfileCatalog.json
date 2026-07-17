@@ -15,7 +15,14 @@
             },
             "mqttTopics": {
                 "component": "dfrobot_c4004",
-                "trajectoryStateTopic": "state/target_trajectory"
+                "trajectoryStateTopic": "state/target_trajectory",
+                "tagEventStateTopic": "state/tag_event",
+                "multiTagConfigStateTopic": "state/multi_tag_config",
+                "multiTagConfigCommandTopic": "command/multi_tag_config/set",
+                "multiTagConfigResultTopic": "result/multi_tag_config/set",
+                "configFileRangeStateTopic": "state/config_file_range",
+                "configFileRangeCommandTopic": "command/config_file_range/set",
+                "configFileRangeResultTopic": "result/config_file_range/set"
             },
             "entitySignature": {
                 "minScore": 4,
