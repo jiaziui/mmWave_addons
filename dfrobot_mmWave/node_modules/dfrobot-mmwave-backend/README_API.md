@@ -217,6 +217,9 @@ interface RegionConfigV2 {
   syncState: {
     fourSidedRange: "synced" | "pending" | "local_only";
     regionMcuIo: "synced" | "pending" | "local_only";
+    tagConfig: "synced" | "pending" | "local_only";
+    customRange: "synced" | "pending" | "local_only";
+    learnedRange: "synced" | "pending" | "local_only";
     updatedAt?: string;
   };
 }
@@ -252,7 +255,8 @@ interface BaseMapInstance {
 
 - 最多保存 32 个区域，`index` 必须唯一。
 - 无 `version: 2` 的旧区域结构不会迁移区域内容，而是生成空 V2 配置。
-- 学习范围 UI 保留但设备接口尚未接入；自定义范围通过 MQTT `config_file_range` 同步到设备。
+- 学习范围通过独立的 MQTT 开启、关闭和查询命令同步到设备；学习过程中不返回中途坐标，停止后才查询最终点集。
+- 自定义范围通过 MQTT `config_file_range` 同步到设备。
 
 ## 3. Meta 接口
 
@@ -572,6 +576,7 @@ interface DeviceDetailResponse {
       canRefresh: boolean;
       canManageRegions: boolean;
     };
+    learnedRange: LearnedRangeRuntime;
   };
 }
 ```
@@ -964,6 +969,91 @@ interface InitializeDeviceRequest {
 | `424` | Home Assistant 未连接 |
 | `502` | HA 写入失败或其他初始化失败 |
 
+### 5.11 学习探测范围状态机
+
+```http
+POST /api/mmwave/devices/:deviceId/actions/learned-range
+```
+
+请求体只有以下三种：
+
+```json
+{ "action": "start" }
+{ "action": "stop" }
+{ "action": "query" }
+```
+
+学习范围使用独立的运行状态，不以已保存点数推断开关状态：
+
+```ts
+type LearnedRangeStatus =
+  | "idle"
+  | "confirming_single_target"
+  | "starting"
+  | "learning"
+  | "stopping"
+  | "querying"
+  | "ready"
+  | "error";
+
+interface LearnedRangeRuntime {
+  status: LearnedRangeStatus;
+  learningEnabled: boolean;
+  singleTargetConfirmCount: number;
+  pointCount: number;
+  pointsCm: Array<{ x: number; y: number }>;
+  error?: string;
+  message?: string;
+  updatedAt: string;
+}
+```
+
+处理规则：
+
+- `start` 不立即启动设备学习，先等待 MQTT 轨迹帧连续 3 次 `targetCount = 1`；任一帧不是 1，计数清零并提示用户确保范围内只有一个目标。
+- 三次确认成功后才发布学习开启命令。学习期间不读取、不保存、不更新中途坐标。
+- `stop` 发布关闭命令，收到成功回执后等待 30ms，再主动发送查询命令。
+- 查询成功后才保存 `mode/appliedMode = "learned"` 和最终 `learnedPointsCm`；设备坐标转换为前端坐标时使用 `xUi = -xDevice`，Y 坐标和点顺序不变。
+- 查询失败不覆盖上一次成功范围，返回错误状态并允许再次使用 `action = "query"` 重试。
+- 学习确认、学习中、停止和查询阶段禁止四方或自定义范围同步；其他设备的状态和确认计数互不影响。
+
+成功响应：
+
+```json
+{
+  "ok": true,
+  "learnedRange": {
+    "status": "confirming_single_target",
+    "learningEnabled": false,
+    "singleTargetConfirmCount": 2,
+    "pointCount": 0,
+    "pointsCm": [],
+    "updatedAt": "2026-07-17T06:00:00.000Z"
+  }
+}
+```
+
+失败状态码：
+
+| 状态码 | 说明 |
+| --- | --- |
+| `400` | action 非 `start`、`stop` 或 `query` |
+| `404` | 设备不存在 |
+| `409` | 设备离线或 MQTT 未连接 |
+| `502` | 设备命令失败、回执失败或查询超时 |
+
+对应 MQTT topic：
+
+```text
+state/learned_trajectory_range
+command/learned_trajectory_range/set
+result/learned_trajectory_range/set
+command/learned_trajectory_range/query
+result/learned_trajectory_range/query
+```
+
+学习状态消息在学习期间固定发送 `learning_enabled: true`、`point_count: 0`，不携带旧坐标 Hex；只有查询成功的结果消息才携带最终 `hex`。
+
 ## 6. 用户底图接口
 
 用户底图保存在 `<dataDir>/base_maps/user`。官方 system 素材由前端静态打包，不使用这些接口。
@@ -1133,9 +1223,9 @@ interface StoredDeviceConfig {
 
 - 当前只实现 C4004 后端能力。
 - C4001/C4002/C4003 当前没有启用 profile 配置。
-- 学习探测范围尚未接入设备；自定义探测范围已接入 C4004 `config_file_range` MQTT command/result 闭环。
+- 学习探测范围已接入 C4004 `learned_trajectory_range` MQTT command/result 闭环，停止学习后才查询最终点集。
 - 自定义探测范围支持 `.ini` 导入/导出；标签区域支持 `.ini` 导入/导出，学习探测范围仍未接入设备。
-- MQTT `learned_trajectory_range` 的 command/result 闭环尚未实现。
+- 学习范围确认计数、学习状态和查询结果通过设备级 WebSocket 刷新前端。
 - `config_file_range` 只有设备确认成功后才落盘到 `config.json`。
 
 ## 10. 标签区域 MQTT 事件与配置闭环

@@ -4,6 +4,7 @@ import type {
   DeviceLogCalendar,
   DeviceLogEntry,
   DeviceLogPage,
+  LearnedRangeRuntime,
   MetaConfig,
   MmwaveDeviceConfig,
   MmwaveDeviceDetail,
@@ -91,7 +92,7 @@ const createRegionConfig = (variant: "kitchen" | "living" | "study"): StoredRegi
       ],
       backgroundInstances: [],
       viewPreferences: { gridVisible: true, backgroundVisible: false },
-      syncState: { fourSidedRange: "synced", regionMcuIo: "synced", tagConfig: "synced", customRange: "local_only", updatedAt: now },
+      syncState: { fourSidedRange: "synced", regionMcuIo: "synced", tagConfig: "synced", customRange: "local_only", learnedRange: "local_only", updatedAt: now },
     };
   }
 
@@ -163,7 +164,7 @@ const createRegionConfig = (variant: "kitchen" | "living" | "study"): StoredRegi
         },
       ],
       viewPreferences: { gridVisible: true, backgroundVisible: true },
-      syncState: { fourSidedRange: "local_only", regionMcuIo: "synced", tagConfig: "synced", customRange: "local_only", updatedAt: now },
+      syncState: { fourSidedRange: "local_only", regionMcuIo: "synced", tagConfig: "synced", customRange: "local_only", learnedRange: "synced", updatedAt: now },
     };
   }
 
@@ -196,7 +197,7 @@ const createRegionConfig = (variant: "kitchen" | "living" | "study"): StoredRegi
     ],
     backgroundInstances: [],
     viewPreferences: { gridVisible: true, backgroundVisible: false },
-    syncState: { fourSidedRange: "pending", regionMcuIo: "pending", tagConfig: "pending", customRange: "synced", updatedAt: now },
+    syncState: { fourSidedRange: "pending", regionMcuIo: "pending", tagConfig: "pending", customRange: "synced", learnedRange: "local_only", updatedAt: now },
   };
 };
 
@@ -204,6 +205,20 @@ const regionConfigs: Record<string, StoredRegionConfig> = {
   "mock-c4004-1": createRegionConfig("kitchen"),
   "mock-c4004-2": createRegionConfig("living"),
   "mock-c4004-3": createRegionConfig("study"),
+};
+
+const mockLearnedRanges: Record<string, LearnedRangeRuntime> = {};
+
+const defaultLearnedRange = (deviceId: string): LearnedRangeRuntime => {
+  const points = regionConfigs[deviceId]?.detection.learnedPointsCm ?? [];
+  return {
+    status: points.length >= 3 ? "ready" : "idle",
+    learningEnabled: false,
+    singleTargetConfirmCount: 0,
+    pointCount: points.length,
+    pointsCm: structuredClone(points),
+    updatedAt: now,
+  };
 };
 
 const baseDevices: StoredMmwaveDevice[] = [
@@ -489,6 +504,8 @@ export const mockFetchDetail = async (deviceId: string): Promise<{ ok: boolean; 
   const tick = nextTick();
   const card = overviewCard(devices[index], tick);
   const online = devices[index].discovery.status === "online";
+  const learnedRange = mockLearnedRanges[deviceId] ?? defaultLearnedRange(deviceId);
+  mockLearnedRanges[deviceId] = learnedRange;
   return {
     ok: true,
     detail: {
@@ -521,8 +538,42 @@ export const mockFetchDetail = async (deviceId: string): Promise<{ ok: boolean; 
         },
       ],
       actions: { canReset: online, canRefresh: online, canManageRegions: devices[index].initialized },
+      learnedRange: structuredClone(learnedRange),
     },
   };
+};
+
+export const mockLearnedRangeAction = async (
+  deviceId: string,
+  action: "start" | "stop" | "query",
+): Promise<{ ok: boolean; learnedRange: LearnedRangeRuntime; detail?: MmwaveDeviceDetail }> => {
+  const device = devices.find((entry) => entry.id === deviceId);
+  if (!device) throw new Error("Mock device not found");
+  if (device.discovery.status !== "online") throw new Error("设备离线，无法执行学习探测范围操作");
+  const current = mockLearnedRanges[deviceId] ?? defaultLearnedRange(deviceId);
+  if (action === "start") {
+    regionConfigs[deviceId].detection.mode = "learned";
+    regionConfigs[deviceId].detection.learnedPointsCm = [];
+    regionConfigs[deviceId].syncState.learnedRange = "local_only";
+    current.status = "confirming_single_target";
+    current.learningEnabled = false;
+    current.singleTargetConfirmCount = 0;
+    current.pointCount = 0;
+    current.pointsCm = [];
+    current.message = "正在确认单目标条件";
+  } else if (action === "stop") {
+    current.status = "ready";
+    current.learningEnabled = false;
+    current.singleTargetConfirmCount = 0;
+    current.message = "学习已停止，等待读取最终范围";
+  } else {
+    current.status = current.pointCount >= 3 ? "ready" : "error";
+    current.message = current.pointCount >= 3 ? "学习范围读取完成" : "学习已停止，但最终范围读取失败";
+  }
+  current.updatedAt = new Date().toISOString();
+  mockLearnedRanges[deviceId] = current;
+  const detail = (await mockFetchDetail(deviceId)).detail;
+  return { ok: true, learnedRange: structuredClone(current), detail };
 };
 
 const mockDeviceLogs = (deviceId: string): DeviceLogEntry[] => {

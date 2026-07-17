@@ -87,6 +87,13 @@ export interface UpdateDeviceConfigResult {
 
 const cloneRangeBox = (rangeBox: RangeBox): RangeBox => ({ ...rangeBox });
 
+const LEARNED_RANGE_PREPARATION_BOX: RangeBox = {
+  xMin: -5,
+  xMax: 5,
+  yMin: 0,
+  yMax: 8,
+};
+
 const buildGenericRegions = (device: StoredMmwaveDevice): RegionOverlay[] =>
   device.regionConfig.regions
     .filter((region) => region.enabled)
@@ -905,7 +912,7 @@ export class MmwaveService {
 
   private learnedRangeCommandAvailable(device: StoredMmwaveDevice): boolean {
     const profile = getMmwaveProfile(device.profileId);
-    return this.mqttBridge.isConfigured() && this.mqttBridge.isConnected() && Boolean(
+    return Boolean(
       profile?.mqttTopics.learnedTrajectoryRangeSetCommandTopic &&
       profile.mqttTopics.learnedTrajectoryRangeSetResultTopic &&
       profile.mqttTopics.learnedTrajectoryRangeQueryCommandTopic &&
@@ -1032,27 +1039,73 @@ export class MmwaveService {
   }
 
   async learnedRangeAction(deviceId: string, action: LearnedRangeAction): Promise<LearnedRangeRuntime> {
-    const device = this.storage.getDevice(deviceId);
-    if (!device) {
+    const storedDevice = this.storage.getDevice(deviceId);
+    if (!storedDevice) {
       throw new Error("Device not found");
     }
-    this.runtimeCache.ensureDevice(device);
+    this.runtimeCache.ensureDevice(storedDevice);
+    // Device files intentionally do not persist runtime discovery data. Refresh
+    // HA first, then use this device's runtime entry so a config read cannot
+    // turn an online device into the default offline state.
+    let device = this.runtimeCache.hydrateDevice(storedDevice);
+    if (this.haClient) {
+      try {
+        const refreshedDevices = await this.refreshDeviceStatuses();
+        device = refreshedDevices.find((entry) => entry.id === deviceId) ?? device;
+        this.mqttBridge.setDevices(this.getManagedMqttDevices(refreshedDevices));
+      } catch (error) {
+        this.logger.warn({ deviceId, error }, "Using cached device status for learned range action");
+      }
+    }
     const current = this.runtimeCache.getLearnedRange(deviceId);
     if (!current) {
       throw new Error("Learned range runtime unavailable");
     }
-    if (device.discovery.status !== "online" || !this.learnedRangeCommandAvailable(device)) {
-      throw new Error("当前设备离线或 MQTT 未连接，无法执行学习探测范围操作。");
+    if (device.discovery.status !== "online") {
+      throw new Error("当前设备离线，无法执行学习探测范围操作。");
+    }
+    if (!this.mqttBridge.isConfigured() || !this.mqttBridge.isConnected()) {
+      throw new Error("MQTT 未连接，无法执行学习探测范围操作。");
+    }
+    if (!this.learnedRangeCommandAvailable(device)) {
+      throw new Error("当前设备 Profile 未配置学习探测范围 MQTT 接口。");
     }
 
     if (action === "start") {
       if (["confirming_single_target", "starting", "learning", "stopping", "querying"].includes(current.status)) {
         return current;
       }
+      const profile = getMmwaveProfile(device.profileId);
+      if (!this.haClient || !profile?.applyFourSidedRange) {
+        throw new Error("当前设备无法设置学习前的四方探测范围。");
+      }
+      try {
+        await profile.applyFourSidedRange(this.haClient, device, LEARNED_RANGE_PREPARATION_BOX);
+      } catch (error) {
+        this.logger.warn({ deviceId, error }, "Failed to prepare four-sided range before learning");
+        throw new Error("学习前的大范围四方探测范围设置失败，未开始学习。");
+      }
+      const clearedRegionConfig = normalizeRegionConfig({
+        ...device.regionConfig,
+        detection: {
+          ...device.regionConfig.detection,
+          mode: "learned",
+          learnedPointsCm: [],
+        },
+        syncState: {
+          ...device.regionConfig.syncState,
+          learnedRange: "local_only",
+          updatedAt: new Date().toISOString(),
+        },
+      });
+      const clearedDevice = this.storage.updateRegionConfig(deviceId, clearedRegionConfig);
+      this.runtimeCache.updateNative(clearedDevice, { regionConfig: clearedRegionConfig });
       const runtime = this.runtimeCache.updateLearnedRange(deviceId, {
         status: "confirming_single_target",
         learningEnabled: false,
         singleTargetConfirmCount: 0,
+        pointCount: 0,
+        pointsCm: [],
         error: undefined,
         message: "正在确认单目标条件，等待 3 帧目标数为 1 的轨迹数据。",
       });

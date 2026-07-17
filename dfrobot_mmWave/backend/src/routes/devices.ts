@@ -53,6 +53,9 @@ const toConfigStatus = (message: string): number => {
   if (message.startsWith("Invalid region config") || message.startsWith("Invalid log retention") || message === "No valid config update provided") {
     return 400;
   }
+  if (message.includes("学习探测范围进行中")) {
+    return 409;
+  }
   return 502;
 };
 
@@ -258,6 +261,24 @@ export const createMmwaveRouter = (service: MmwaveService): Router => {
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to refresh device";
       res.status(message === "Device not found" ? 404 : 502).json({ ok: false, error: message });
+    }
+  });
+
+  router.post("/devices/:deviceId/actions/learned-range", async (req, res) => {
+    try {
+      const action = req.body?.action;
+      if (action !== "start" && action !== "stop" && action !== "query") {
+        res.status(400).json({ ok: false, error: "Invalid learned range action" });
+        return;
+      }
+      res.json({
+        ok: true,
+        learnedRange: await service.learnedRangeAction(req.params.deviceId, action),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to operate learned range";
+      const status = message === "Device not found" ? 404 : message.includes("离线") || message.includes("MQTT") ? 409 : 502;
+      res.status(status).json({ ok: false, error: message });
     }
   });
 

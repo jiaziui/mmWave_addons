@@ -2680,6 +2680,21 @@ text.region-shape-label {
   padding: 1rem;
 }
 
+.region-panel-actions-stacked {
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.region-panel-actions-row {
+  display: flex;
+  gap: 0.55rem;
+  width: 100%;
+}
+
+.region-panel-actions-row > button {
+  flex: 1;
+}
+
 .region-detection-footer {
   display: flex;
   justify-content: center;
@@ -2957,7 +2972,7 @@ text.region-shape-label {
   position: absolute;
   top: 1rem;
   left: 1rem;
-  width: 320px;
+  width: 280px;
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
@@ -2979,7 +2994,28 @@ text.region-shape-label {
 }
 
 .region-edit-panel {
-  height: 380px;
+  height: auto;
+  max-height: min(86vh, 840px);
+}
+
+.region-edit-panel .region-form-grid {
+  flex: 0 1 auto;
+  min-height: 0;
+  align-content: start;
+  align-items: start;
+  gap: 0.55rem;
+  padding: 0.75rem;
+}
+
+.region-edit-panel .region-form-grid input,
+.region-edit-panel .region-form-grid select {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  border-radius: 10px;
+  padding: 0.4rem 0.55rem;
+  font-size: 0.84rem;
+  line-height: 1.25;
 }
 
 .region-panel-head {
@@ -3145,12 +3181,15 @@ text.region-shape-label {
 
 .region-form-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  align-content: start;
   overflow-y: auto;
 }
 
 .region-form-grid label {
   display: grid;
-  gap: 0.4rem;
+  gap: 0.3rem;
+  min-width: 0;
 }
 
 .region-form-grid .region-form-full {
@@ -3196,9 +3235,22 @@ text.region-shape-label {
 
 .region-panel-actions button {
   flex: 1;
+  border: 0;
+  border-radius: 999px;
+  padding: 0.4rem 0.8rem;
+  color: #fff;
+  background: linear-gradient(135deg, #2f67e9, #4a90ff);
+  font-size: 0.78rem;
+  font-weight: 700;
+  line-height: 1.25;
+  white-space: nowrap;
+  box-shadow: none;
 }
 
-.region-panel-actions button,
+.region-panel-actions button:hover {
+  background: linear-gradient(135deg, #2a5fd6, #3f84f0);
+}
+
 .region-panel-head > button,
 .detection-mode-tabs button {
   min-width: 0;

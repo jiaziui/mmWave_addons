@@ -45,8 +45,20 @@ const start = async () => {
         onConfigFileRangeResult: (deviceId, snapshot) => {
             service.handleConfigFileRangeResult(deviceId, snapshot);
         },
+        onLearnedTrajectoryRangeState: (deviceId, snapshot) => {
+            service.handleLearnedTrajectoryRangeState(deviceId, snapshot);
+        },
+        onLearnedTrajectoryRangeSetResult: (deviceId, snapshot) => {
+            service.handleLearnedTrajectoryRangeSetResult(deviceId, snapshot);
+        },
+        onLearnedTrajectoryRangeQueryResult: (deviceId, snapshot) => {
+            service.handleLearnedTrajectoryRangeQueryResult(deviceId, snapshot);
+        },
     });
     service = new mmwaveService_1.MmwaveService(haClient, storage, mqttBridge, logger_1.logger, deviceLogStorage);
+    service.setLiveNotifier((deviceId) => {
+        liveHub.notifyDevice(deviceId);
+    });
     deviceLogStorage.startRetentionScheduler(() => storage.listDevices(), (error) => logger_1.logger.error({ error }, "Failed to clean device logs at midnight"));
     const haEventBridge = config.ha && haClient
         ? new eventBridge_1.HaEventBridge(config.ha, haClient, logger_1.logger, {

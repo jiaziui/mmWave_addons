@@ -4,6 +4,7 @@ import {
   fetchDeviceConfig,
   fetchDeviceDetail,
   fetchUserBaseMaps,
+  learnedRangeAction,
   updateDeviceConfig,
   uploadUserBaseMap,
   userBaseMapUrl,
@@ -187,6 +188,7 @@ export function RegionManagementPage({
   const [backgroundMessage, setBackgroundMessage] = useState("可导入图片并添加到坐标系");
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [learningActionBusy, setLearningActionBusy] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [cellSize, setCellSize] = useState(BASE_CELL);
   const [viewportOffset, setViewportOffset] = useState({ x: 0, y: 0 });
@@ -211,6 +213,7 @@ export function RegionManagementPage({
   const dirtyBeforeRegionEditRef = useRef(false);
   const regionDraftRef = useRef<RegionDefinition | null>(null);
   const activeDeviceIdRef = useRef<string | null>(selectedDevice?.id ?? null);
+  const lastLearnedRangeMessageRef = useRef<string>("");
   const detectionBaselineRef = useRef<{
     detection: StoredRegionConfig["detection"];
     rangeBox: StoredRegionConfig["rangeBox"];
@@ -241,6 +244,8 @@ export function RegionManagementPage({
     setCurrentConfig(null);
     setDetail(null);
     setSaving(false);
+    setLearningActionBusy(false);
+    lastLearnedRangeMessageRef.current = "";
     setLoading(true);
     setSelectedRegionId(null);
     setSelectedBackgroundId(null);
@@ -347,6 +352,62 @@ export function RegionManagementPage({
   );
 
   const readOnly = !detail?.online;
+  const learnedRange = detail?.learnedRange;
+  const learningLocked = Boolean(learnedRange && [
+    "confirming_single_target",
+    "starting",
+    "learning",
+    "stopping",
+    "querying",
+  ].includes(learnedRange.status));
+  const learningToggleOn = Boolean(learnedRange?.learningEnabled || learningLocked);
+
+  useEffect(() => {
+    const message = detail?.learnedRange?.message;
+    if (!message || message === lastLearnedRangeMessageRef.current) {
+      return;
+    }
+    lastLearnedRangeMessageRef.current = message;
+    if (detail?.learnedRange.status === "error") {
+      onError(message);
+    } else {
+      onMessage(message);
+    }
+  }, [detail?.learnedRange?.message, detail?.learnedRange?.status, onError, onMessage]);
+
+  const operateLearnedRange = async (action: "start" | "stop" | "query") => {
+    if (!selectedDevice || readOnly || learningActionBusy) {
+      return;
+    }
+    const targetDeviceId = selectedDevice.id;
+    setLearningActionBusy(true);
+    try {
+      const response = await learnedRangeAction(targetDeviceId, action);
+      if (activeDeviceIdRef.current !== targetDeviceId) return;
+      if (response.detail) {
+        setDetail(response.detail);
+      }
+      const [configResult, detailResult] = await Promise.allSettled([
+        fetchDeviceConfig(targetDeviceId),
+        fetchDeviceDetail(targetDeviceId),
+      ]);
+      if (activeDeviceIdRef.current === targetDeviceId) {
+        if (configResult.status === "fulfilled") {
+          setCurrentConfig(configResult.value.config);
+        }
+        if (detailResult.status === "fulfilled") {
+          setDetail(detailResult.value.detail);
+        }
+      }
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "学习探测范围操作失败");
+    } finally {
+      if (activeDeviceIdRef.current === targetDeviceId) {
+        setLearningActionBusy(false);
+      }
+    }
+  };
+
   const regionConfig = deviceConfig?.regionConfig ?? null;
   const libraryAssets: LibraryAsset[] = [
     ...systemAssets,
@@ -1475,7 +1536,7 @@ export function RegionManagementPage({
     ? detection.mode
     : (detection.appliedMode ?? detection.mode);
   const learnedDisplayPoints =
-    visibleDetectionMode === "learned"
+    visibleDetectionMode === "learned" && !learningLocked
       ? detection.learnedPointsCm
       : [];
   const xTickMin = Math.floor((0 - viewportOffset.x) / (cellSize * 2));
@@ -1906,9 +1967,17 @@ export function RegionManagementPage({
             <div className="region-panel-head"><div><h3>探测范围</h3></div></div>
             <p className="region-range-hint">{getDetectionHint(detection)}</p>
             <div className="detection-mode-tabs">{(["rect", "learned", "custom"] as const).map((mode) => <button type="button" key={mode} className={detection.mode === mode ? "active" : ""} disabled={readOnly && mode !== detection.mode} onClick={() => {
+              if (learningLocked && mode !== "learned") {
+                onError("学习探测范围进行中，请先关闭学习后再切换探测范围。");
+                return;
+              }
               const next = cloneConfig(regionConfig);
               next.detection.mode = mode;
-              if (mode === "custom") {
+              if (mode === "learned") {
+                // A new learning session never previews the previous result.
+                // The backend permanently clears it only after Start is pressed.
+                next.detection.learnedPointsCm = [];
+              } else if (mode === "custom") {
                 // Start a fresh custom draft; closing without apply restores last applied range.
                 next.detection.customConfirmed = false;
                 next.detection.customPointsCm = [];
@@ -1944,22 +2013,47 @@ export function RegionManagementPage({
             </> : null}
             {detection.mode === "learned" ? <>
               <div className="region-range-switch-row">
-                <div><strong>开始学习探测范围</strong></div>
-                <button type="button" className={detection.learnedPointsCm.length ? "region-range-switch on" : "region-range-switch"} disabled={readOnly} aria-pressed={detection.learnedPointsCm.length ? "true" : "false"}><span /></button>
+                <div>
+                  <strong>开始学习探测范围</strong>
+                  <small>
+                    {learnedRange?.status === "confirming_single_target"
+                      ? `已确认 ${learnedRange.singleTargetConfirmCount}/3`
+                      : learnedRange?.status === "starting"
+                        ? "正在启动学习"
+                        : learnedRange?.status === "learning"
+                          ? "学习进行中"
+                          : learnedRange?.status === "stopping"
+                            ? "正在停止学习"
+                            : learnedRange?.status === "querying"
+                              ? "正在读取学习结果"
+                              : "开始前需要连续确认 3 帧单目标"}
+                  </small>
+                </div>
+                <button
+                  type="button"
+                  className={learningToggleOn ? "region-range-switch on" : "region-range-switch"}
+                  disabled={readOnly || learningActionBusy}
+                  aria-pressed={learningToggleOn ? "true" : "false"}
+                  onClick={() => void operateLearnedRange(learningToggleOn ? "stop" : "start")}
+                >
+                  <span />
+                </button>
               </div>
-              <div className="region-detection-footer">
-              <button type="button" className="primary-button region-detection-action-btn" disabled={readOnly || saving || detection.learnedPointsCm.length < 3} onClick={() => {
-                void (async () => {
-                  const next = cloneConfig(regionConfig);
-                  next.detection.mode = "learned";
-                  next.detection.appliedMode = "learned";
-                  const saved = await persistRegionConfig(next);
-                  if (saved) refreshDetectionBaseline();
-                })();
-              }}>设置并本地应用</button>
-              </div>
+              {learnedRange?.status === "error" ? (
+                <div className="region-detection-footer">
+                  <button
+                    type="button"
+                    className="primary-button region-detection-action-btn"
+                    disabled={readOnly || learningActionBusy}
+                    onClick={() => void operateLearnedRange("query")}
+                  >
+                    重新查询学习结果
+                  </button>
+                </div>
+              ) : null}
+              <p className="region-range-hint">开始时会先把设备范围扩展到 X -5~5m、Y 0~8m，再确认 3 帧单目标；学习期间不显示中途坐标。</p>
             </> : null}
-            {detection.mode === "custom" ? <><div className="custom-range-status">{getDetectionHint(detection)}</div><div className="region-panel-actions"><button type="button" disabled={readOnly || detection.customPointsCm.length === 0} onClick={() => { const next = cloneConfig(regionConfig); next.detection.customPointsCm.pop(); setCurrentConfig({ ...deviceConfig!, regionConfig: next }); setDirty(true); }}>撤销</button><button type="button" disabled={readOnly || detection.customPointsCm.length === 0} onClick={() => { const next = cloneConfig(regionConfig); next.detection.customPointsCm = []; next.detection.customConfirmed = false; setCurrentConfig({ ...deviceConfig!, regionConfig: next }); setDirty(true); }}>清除</button><button type="button" className="primary-button" disabled={readOnly || saving || !canConfirmCustomRange(detection.customPointsCm)} onClick={() => {
+            {detection.mode === "custom" ? <><div className="custom-range-status">{getDetectionHint(detection)}</div><div className="region-panel-actions region-panel-actions-stacked"><div className="region-panel-actions-row"><button type="button" disabled={readOnly || detection.customPointsCm.length === 0} onClick={() => { const next = cloneConfig(regionConfig); next.detection.customPointsCm.pop(); setCurrentConfig({ ...deviceConfig!, regionConfig: next }); setDirty(true); }}>撤销</button><button type="button" disabled={readOnly || detection.customPointsCm.length === 0} onClick={() => { const next = cloneConfig(regionConfig); next.detection.customPointsCm = []; next.detection.customConfirmed = false; setCurrentConfig({ ...deviceConfig!, regionConfig: next }); setDirty(true); }}>清除</button></div><div className="region-panel-actions-row"><button type="button" className="primary-button" disabled={readOnly || saving || !canConfirmCustomRange(detection.customPointsCm)} onClick={() => {
               void (async () => {
                 const next = cloneConfig(regionConfig);
                 next.detection.mode = "custom";
@@ -1968,7 +2062,7 @@ export function RegionManagementPage({
                 const saved = await persistRegionConfig(next, { customRange: true });
                 if (saved) refreshDetectionBaseline();
               })();
-            }}>确认并同步设备</button></div></> : null}
+            }}>确认并同步设备</button></div></div></> : null}
           </> : null}
         </aside> : null}
         </div>

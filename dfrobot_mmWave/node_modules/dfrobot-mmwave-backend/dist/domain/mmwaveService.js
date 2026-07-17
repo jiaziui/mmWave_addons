@@ -9,6 +9,7 @@ const runtimeCache_1 = require("./runtimeCache");
 const regionIo_1 = require("./regionIo");
 const tagConfig_1 = require("./tagConfig");
 const trajectory_1 = require("./trajectory");
+const learnedRange_1 = require("./learnedRange");
 const cloneRangeBox = (rangeBox) => ({ ...rangeBox });
 const buildGenericRegions = (device) => device.regionConfig.regions
     .filter((region) => region.enabled)
@@ -88,6 +89,14 @@ const buildGenericDeviceDetail = (device, mqttBridge, trajectory) => {
             canRefresh: true,
             canManageRegions: Boolean(profile?.capabilities.supportsRegions),
         },
+        learnedRange: {
+            status: "idle",
+            learningEnabled: false,
+            singleTargetConfirmCount: 0,
+            pointCount: device.regionConfig.detection.learnedPointsCm.length,
+            pointsCm: device.regionConfig.detection.learnedPointsCm,
+            updatedAt: new Date().toISOString(),
+        },
     };
 };
 const buildMetrics = (devices) => ({
@@ -139,6 +148,14 @@ class MmwaveService {
         this.runtimeCache = new runtimeCache_1.RuntimeCacheStore();
         this.pendingMultiTagConfig = new Map();
         this.pendingConfigFileRange = new Map();
+        this.pendingLearnedRangeSet = new Map();
+        this.pendingLearnedRangeQuery = new Map();
+    }
+    setLiveNotifier(notifier) {
+        this.liveNotifier = notifier;
+    }
+    notifyRuntime(deviceId) {
+        this.liveNotifier?.(deviceId);
     }
     getManagedMqttDevices(devices) {
         return devices.filter((device) => {
@@ -194,6 +211,28 @@ class MmwaveService {
                 reject: (error) => {
                     clearTimeout(timeout);
                     this.pendingConfigFileRange.delete(requestId);
+                    reject(error);
+                },
+                timeout,
+            });
+        });
+    }
+    waitForLearnedRangeResult(pendingMap, deviceId, requestId, timeoutMessage, timeoutMs = 4000) {
+        return new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => {
+                pendingMap.delete(requestId);
+                reject(new Error(timeoutMessage));
+            }, timeoutMs);
+            pendingMap.set(requestId, {
+                deviceId,
+                resolve: (snapshot) => {
+                    clearTimeout(timeout);
+                    pendingMap.delete(requestId);
+                    resolve(snapshot);
+                },
+                reject: (error) => {
+                    clearTimeout(timeout);
+                    pendingMap.delete(requestId);
                     reject(error);
                 },
                 timeout,
@@ -355,11 +394,21 @@ class MmwaveService {
         const trajectory = this.runtimeCache.getTrajectory(detailDevice.id);
         const tagRegions = this.runtimeCache.getTagRegions(detailDevice.id);
         if (profile?.buildDeviceDetail) {
-            return profile.buildDeviceDetail(detailDevice, deviceStatesById, {
-                trajectory,
-                tagRegions,
-                mqttConnected: this.mqttBridge.isConnected(),
-            });
+            return {
+                ...profile.buildDeviceDetail(detailDevice, deviceStatesById, {
+                    trajectory,
+                    tagRegions,
+                    mqttConnected: this.mqttBridge.isConnected(),
+                }),
+                learnedRange: this.runtimeCache.getLearnedRange(detailDevice.id) ?? {
+                    status: "idle",
+                    learningEnabled: false,
+                    singleTargetConfirmCount: 0,
+                    pointCount: detailDevice.regionConfig.detection.learnedPointsCm.length,
+                    pointsCm: detailDevice.regionConfig.detection.learnedPointsCm,
+                    updatedAt: new Date().toISOString(),
+                },
+            };
         }
         return buildGenericDeviceDetail(detailDevice, this.mqttBridge, trajectory);
     }
@@ -420,6 +469,12 @@ class MmwaveService {
         if (input.apply?.customRange &&
             (input.apply.fourSidedRange || input.apply.regionMcuIo || input.apply.tagConfig)) {
             throw new Error("Invalid region config: custom range synchronization must be requested separately");
+        }
+        const learnedRuntime = this.runtimeCache.getLearnedRange(deviceId);
+        if (learnedRuntime &&
+            ["confirming_single_target", "starting", "learning", "stopping", "querying"].includes(learnedRuntime.status) &&
+            (input.apply?.fourSidedRange || input.apply?.customRange)) {
+            throw new Error("学习探测范围进行中，请先关闭学习后再切换探测范围。");
         }
         const profile = (0, registry_1.getMmwaveProfile)(device.profileId);
         if (input.logRetention) {
@@ -508,6 +563,7 @@ class MmwaveService {
                     regionMcuIo: input.apply?.regionMcuIo ? "pending" : normalized.syncState.regionMcuIo,
                     tagConfig: input.apply?.tagConfig ? "pending" : normalized.syncState.tagConfig,
                     customRange: normalized.syncState.customRange,
+                    learnedRange: normalized.syncState.learnedRange,
                     updatedAt: new Date().toISOString(),
                 },
             };
@@ -598,6 +654,7 @@ class MmwaveService {
                 customRange: applyResult.customRange === "applied"
                     ? "synced"
                     : device.regionConfig.syncState.customRange,
+                learnedRange: device.regionConfig.syncState.learnedRange,
                 updatedAt: new Date().toISOString(),
             };
             device = this.storage.updateRegionConfig(deviceId, {
@@ -635,10 +692,228 @@ class MmwaveService {
         this.mqttBridge.setDevices(this.getManagedMqttDevices(devices));
         return this.hydrateDevices(devices);
     }
+    learnedRangeCommandAvailable(device) {
+        const profile = (0, registry_1.getMmwaveProfile)(device.profileId);
+        return this.mqttBridge.isConfigured() && this.mqttBridge.isConnected() && Boolean(profile?.mqttTopics.learnedTrajectoryRangeSetCommandTopic &&
+            profile.mqttTopics.learnedTrajectoryRangeSetResultTopic &&
+            profile.mqttTopics.learnedTrajectoryRangeQueryCommandTopic &&
+            profile.mqttTopics.learnedTrajectoryRangeQueryResultTopic);
+    }
+    async startLearningAfterConfirmation(deviceId) {
+        const device = this.storage.getDevice(deviceId);
+        const current = this.runtimeCache.getLearnedRange(deviceId);
+        if (!device || !current || current.status !== "starting") {
+            return;
+        }
+        const requestId = `${device.id}-learn-start-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        try {
+            const resultPromise = this.waitForLearnedRangeResult(this.pendingLearnedRangeSet, deviceId, requestId, "Timed out waiting for learned range start result");
+            if (!this.mqttBridge.publishLearnedTrajectoryRangeSetCommand(device, {
+                request_id: requestId,
+                learning_enabled: true,
+            })) {
+                this.pendingLearnedRangeSet.get(requestId)?.reject(new Error("Failed to publish learned range start command"));
+            }
+            const result = await resultPromise;
+            if (!result.ok) {
+                throw new Error(result.error || "Device rejected learned range start");
+            }
+            this.runtimeCache.updateLearnedRange(deviceId, {
+                status: "learning",
+                learningEnabled: true,
+                error: undefined,
+                message: "学习进行中，请沿探测范围边界行走。",
+            });
+            this.notifyRuntime(deviceId);
+        }
+        catch (error) {
+            this.runtimeCache.updateLearnedRange(deviceId, {
+                status: "error",
+                learningEnabled: false,
+                error: error instanceof Error ? error.message : String(error),
+                message: "学习探测范围启动失败，请重试。",
+            });
+            this.notifyRuntime(deviceId);
+        }
+    }
+    async queryLearnedRange(deviceId) {
+        const device = this.storage.getDevice(deviceId);
+        if (!device) {
+            throw new Error("Device not found");
+        }
+        this.runtimeCache.updateLearnedRange(deviceId, {
+            status: "querying",
+            error: undefined,
+            message: "正在读取学习结果。",
+        });
+        this.notifyRuntime(deviceId);
+        const requestId = `${device.id}-learn-query-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        try {
+            const resultPromise = this.waitForLearnedRangeResult(this.pendingLearnedRangeQuery, deviceId, requestId, "Timed out waiting for learned range query result");
+            if (!this.mqttBridge.publishLearnedTrajectoryRangeQueryCommand(device, { request_id: requestId })) {
+                this.pendingLearnedRangeQuery.get(requestId)?.reject(new Error("Failed to publish learned range query command"));
+            }
+            const result = await resultPromise;
+            if (!result.ok || !result.hex) {
+                throw new Error(result.error || "Learned range query returned no points");
+            }
+            const pointsCm = (0, learnedRange_1.parseLearnedRangeHex)(result.hex);
+            const currentDevice = this.storage.getDevice(deviceId);
+            if (!currentDevice) {
+                throw new Error("Device not found");
+            }
+            const regionConfig = (0, storage_1.normalizeRegionConfig)({
+                ...currentDevice.regionConfig,
+                detection: {
+                    ...currentDevice.regionConfig.detection,
+                    mode: "learned",
+                    appliedMode: "learned",
+                    learnedPointsCm: pointsCm,
+                },
+                syncState: {
+                    ...currentDevice.regionConfig.syncState,
+                    learnedRange: "synced",
+                    updatedAt: new Date().toISOString(),
+                },
+            });
+            this.storage.updateRegionConfig(deviceId, regionConfig);
+            const runtime = this.runtimeCache.updateLearnedRange(deviceId, {
+                status: "ready",
+                learningEnabled: false,
+                singleTargetConfirmCount: 0,
+                pointCount: pointsCm.length,
+                pointsCm,
+                error: undefined,
+                message: "学习范围已更新。",
+            });
+            this.notifyRuntime(deviceId);
+            return runtime ?? {
+                status: "ready",
+                learningEnabled: false,
+                singleTargetConfirmCount: 0,
+                pointCount: pointsCm.length,
+                pointsCm,
+                updatedAt: new Date().toISOString(),
+            };
+        }
+        catch (error) {
+            this.runtimeCache.updateLearnedRange(deviceId, {
+                status: "error",
+                learningEnabled: false,
+                error: error instanceof Error ? error.message : String(error),
+                message: "学习已停止，但最终范围读取失败。",
+            });
+            this.notifyRuntime(deviceId);
+            throw error;
+        }
+    }
+    async learnedRangeAction(deviceId, action) {
+        const device = this.storage.getDevice(deviceId);
+        if (!device) {
+            throw new Error("Device not found");
+        }
+        this.runtimeCache.ensureDevice(device);
+        const current = this.runtimeCache.getLearnedRange(deviceId);
+        if (!current) {
+            throw new Error("Learned range runtime unavailable");
+        }
+        if (device.discovery.status !== "online" || !this.learnedRangeCommandAvailable(device)) {
+            throw new Error("当前设备离线或 MQTT 未连接，无法执行学习探测范围操作。");
+        }
+        if (action === "start") {
+            if (["confirming_single_target", "starting", "learning", "stopping", "querying"].includes(current.status)) {
+                return current;
+            }
+            const runtime = this.runtimeCache.updateLearnedRange(deviceId, {
+                status: "confirming_single_target",
+                learningEnabled: false,
+                singleTargetConfirmCount: 0,
+                error: undefined,
+                message: "正在确认单目标条件，等待 3 帧目标数为 1 的轨迹数据。",
+            });
+            this.notifyRuntime(deviceId);
+            return runtime ?? current;
+        }
+        if (action === "stop") {
+            if (current.status === "confirming_single_target") {
+                const runtime = this.runtimeCache.updateLearnedRange(deviceId, {
+                    status: "idle",
+                    singleTargetConfirmCount: 0,
+                    message: "学习确认已取消。",
+                });
+                this.notifyRuntime(deviceId);
+                return runtime ?? current;
+            }
+            if (!["learning", "starting"].includes(current.status)) {
+                return current;
+            }
+            this.runtimeCache.updateLearnedRange(deviceId, { status: "stopping", message: "正在停止学习。" });
+            this.notifyRuntime(deviceId);
+            const requestId = `${device.id}-learn-stop-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+            try {
+                const resultPromise = this.waitForLearnedRangeResult(this.pendingLearnedRangeSet, deviceId, requestId, "Timed out waiting for learned range stop result");
+                if (!this.mqttBridge.publishLearnedTrajectoryRangeSetCommand(device, {
+                    request_id: requestId,
+                    learning_enabled: false,
+                })) {
+                    this.pendingLearnedRangeSet.get(requestId)?.reject(new Error("Failed to publish learned range stop command"));
+                }
+                const result = await resultPromise;
+                if (!result.ok) {
+                    throw new Error(result.error || "Device rejected learned range stop");
+                }
+                await new Promise((resolve) => setTimeout(resolve, 30));
+                return await this.queryLearnedRange(deviceId);
+            }
+            catch (error) {
+                this.runtimeCache.updateLearnedRange(deviceId, {
+                    status: "error",
+                    learningEnabled: false,
+                    error: error instanceof Error ? error.message : String(error),
+                    message: "学习已停止，但最终范围读取失败。",
+                });
+                this.notifyRuntime(deviceId);
+                throw error;
+            }
+        }
+        if (["confirming_single_target", "starting", "learning", "stopping"].includes(current.status)) {
+            throw new Error("学习探测范围进行中，请先关闭学习后再查询结果。");
+        }
+        return this.queryLearnedRange(deviceId);
+    }
     handleTrajectorySnapshot(deviceId, snapshot) {
         const device = this.storage.getDevice(deviceId);
         if (device) {
             this.runtimeCache.ensureDevice(device);
+        }
+        const learned = this.runtimeCache.getLearnedRange(deviceId);
+        if (learned?.status === "confirming_single_target") {
+            if (snapshot.targetCount === 1) {
+                const count = learned.singleTargetConfirmCount + 1;
+                if (count >= 3) {
+                    this.runtimeCache.updateLearnedRange(deviceId, {
+                        status: "starting",
+                        singleTargetConfirmCount: count,
+                        message: "单目标条件已确认，正在启动学习。",
+                    });
+                    this.notifyRuntime(deviceId);
+                    void this.startLearningAfterConfirmation(deviceId);
+                }
+                else {
+                    this.runtimeCache.updateLearnedRange(deviceId, {
+                        singleTargetConfirmCount: count,
+                        message: `正在确认单目标条件，已确认 ${count}/3。`,
+                    });
+                    this.notifyRuntime(deviceId);
+                }
+            }
+            else {
+                this.runtimeCache.updateLearnedRange(deviceId, {
+                    singleTargetConfirmCount: 0,
+                    message: "开始学习前请确保探测范围内只有一个轨迹目标。",
+                });
+                this.notifyRuntime(deviceId);
+            }
         }
         return this.runtimeCache.updateTrajectory(deviceId, snapshot);
     }
@@ -738,6 +1013,50 @@ class MmwaveService {
             return;
         }
         pending.reject(new Error(snapshot.error || "Config file range rejected by device"));
+    }
+    handleLearnedTrajectoryRangeState(deviceId, snapshot) {
+        const device = this.storage.getDevice(deviceId);
+        if (!device) {
+            return;
+        }
+        this.runtimeCache.ensureDevice(device);
+        const current = this.runtimeCache.getLearnedRange(deviceId);
+        this.runtimeCache.updateLearnedRange(deviceId, {
+            learningEnabled: snapshot.learningEnabled,
+            pointCount: snapshot.learningEnabled ? 0 : snapshot.pointCount,
+            status: snapshot.learningEnabled ? "learning" : (current?.status === "querying" ? "querying" : current?.status ?? "idle"),
+        });
+        this.notifyRuntime(deviceId);
+    }
+    handleLearnedTrajectoryRangeSetResult(deviceId, snapshot) {
+        if (!snapshot.requestId) {
+            return;
+        }
+        const pending = this.pendingLearnedRangeSet.get(snapshot.requestId);
+        if (!pending || pending.deviceId !== deviceId) {
+            return;
+        }
+        if (snapshot.ok) {
+            pending.resolve(snapshot);
+        }
+        else {
+            pending.reject(new Error(snapshot.error || "Learned range command rejected by device"));
+        }
+    }
+    handleLearnedTrajectoryRangeQueryResult(deviceId, snapshot) {
+        if (!snapshot.requestId) {
+            return;
+        }
+        const pending = this.pendingLearnedRangeQuery.get(snapshot.requestId);
+        if (!pending || pending.deviceId !== deviceId) {
+            return;
+        }
+        if (snapshot.ok) {
+            pending.resolve(snapshot);
+        }
+        else {
+            pending.reject(new Error(snapshot.error || "Learned range query rejected by device"));
+        }
     }
 }
 exports.MmwaveService = MmwaveService;

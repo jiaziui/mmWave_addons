@@ -184,6 +184,7 @@ const createDefaultSyncState = () => ({
     regionMcuIo: "local_only",
     tagConfig: "local_only",
     customRange: "local_only",
+    learnedRange: "local_only",
 });
 const createDefaultViewPreferences = () => ({
     gridVisible: true,
@@ -353,6 +354,7 @@ const normalizeSyncState = (value) => {
         regionMcuIo: normalizeStatus(record.regionMcuIo),
         tagConfig: normalizeStatus(record.tagConfig),
         customRange: normalizeStatus(record.customRange),
+        learnedRange: normalizeStatus(record.learnedRange),
         updatedAt: typeof record.updatedAt === "string" && record.updatedAt.trim() ? record.updatedAt : undefined,
     };
 };

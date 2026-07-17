@@ -568,6 +568,14 @@ export const c4004ProfileAdapter: MmwaveProfileAdapter = {
         canRefresh: true,
         canManageRegions: true,
       },
+      learnedRange: {
+        status: "idle",
+        learningEnabled: false,
+        singleTargetConfirmCount: 0,
+        pointCount: device.regionConfig.detection.learnedPointsCm.length,
+        pointsCm: device.regionConfig.detection.learnedPointsCm.map((point) => ({ ...point })),
+        updatedAt: new Date().toISOString(),
+      },
     };
   },
   readDeviceSettings: (device, statesById) => buildDeviceSettings(statesById, device.prefix),

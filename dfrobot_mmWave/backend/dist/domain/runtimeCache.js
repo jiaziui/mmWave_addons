@@ -29,6 +29,14 @@ class RuntimeCacheStore {
                 mqtt: {
                     tagRegions: new Map(),
                 },
+                learnedRange: {
+                    status: "idle",
+                    learningEnabled: false,
+                    singleTargetConfirmCount: 0,
+                    pointCount: device.regionConfig.detection.learnedPointsCm.length,
+                    pointsCm: device.regionConfig.detection.learnedPointsCm.map((point) => ({ ...point })),
+                    updatedAt: now,
+                },
                 updatedAt: now,
             },
         };
@@ -114,6 +122,24 @@ class RuntimeCacheStore {
     }
     getTagRegions(deviceId) {
         return this.devices.get(deviceId)?.state.mqtt.tagRegions ?? new Map();
+    }
+    getLearnedRange(deviceId) {
+        const learned = this.devices.get(deviceId)?.state.learnedRange;
+        return learned ? { ...learned, pointsCm: learned.pointsCm.map((point) => ({ ...point })) } : undefined;
+    }
+    updateLearnedRange(deviceId, update) {
+        const current = this.devices.get(deviceId)?.state;
+        if (!current) {
+            return undefined;
+        }
+        current.learnedRange = {
+            ...current.learnedRange,
+            ...update,
+            pointsCm: update.pointsCm ? update.pointsCm.map((point) => ({ ...point })) : current.learnedRange.pointsCm,
+            updatedAt: update.updatedAt ?? new Date().toISOString(),
+        };
+        current.updatedAt = current.learnedRange.updatedAt;
+        return this.getLearnedRange(deviceId);
     }
     hydrateDevice(device) {
         const cache = this.devices.get(device.id)?.state;

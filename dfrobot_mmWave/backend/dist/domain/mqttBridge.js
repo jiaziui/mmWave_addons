@@ -78,6 +78,51 @@ const parseConfigFileRangeResult = (topic, payload) => {
         return null;
     }
 };
+const parseLearnedTrajectoryRangeState = (topic, payload) => {
+    try {
+        const parsed = JSON.parse(payload);
+        const route = parseBridgeTopic(topic);
+        if (!route || typeof parsed.learning_enabled !== "boolean" || typeof parsed.point_count !== "number") {
+            return null;
+        }
+        return {
+            topic,
+            topicPrefix: route.topicPrefix,
+            mqttKey: route.mqttKey,
+            learningEnabled: parsed.learning_enabled,
+            pointCount: parsed.point_count,
+            hex: typeof parsed.hex === "string" ? parsed.hex : undefined,
+            receivedAt: new Date().toISOString(),
+        };
+    }
+    catch {
+        return null;
+    }
+};
+const parseLearnedTrajectoryRangeResult = (topic, payload) => {
+    try {
+        const parsed = JSON.parse(payload);
+        const route = parseBridgeTopic(topic);
+        if (!route || typeof parsed.ok !== "boolean") {
+            return null;
+        }
+        return {
+            topic,
+            topicPrefix: route.topicPrefix,
+            mqttKey: route.mqttKey,
+            requestId: typeof parsed.request_id === "string" ? parsed.request_id : undefined,
+            ok: parsed.ok,
+            learningEnabled: typeof parsed.learning_enabled === "boolean" ? parsed.learning_enabled : undefined,
+            pointCount: typeof parsed.point_count === "number" ? parsed.point_count : undefined,
+            hex: typeof parsed.hex === "string" ? parsed.hex : undefined,
+            error: typeof parsed.error === "string" ? parsed.error : undefined,
+            receivedAt: new Date().toISOString(),
+        };
+    }
+    catch {
+        return null;
+    }
+};
 class MqttBridge {
     constructor(config, logger, handlers = {}) {
         this.config = config;
@@ -174,6 +219,27 @@ class MqttBridge {
                     this.handlers.onConfigFileRangeResult?.(device.id, result);
                 }
             }
+            if (route?.suffix === "state/learned_trajectory_range") {
+                const snapshot = parseLearnedTrajectoryRangeState(topic, raw);
+                const device = snapshot ? this.findDeviceByRoute(snapshot.topicPrefix, snapshot.mqttKey) : undefined;
+                if (snapshot && device) {
+                    this.handlers.onLearnedTrajectoryRangeState?.(device.id, snapshot);
+                }
+                return;
+            }
+            if (route?.suffix === "result/learned_trajectory_range/set" || route?.suffix === "result/learned_trajectory_range/query") {
+                const snapshot = parseLearnedTrajectoryRangeResult(topic, raw);
+                const device = snapshot ? this.findDeviceByRoute(snapshot.topicPrefix, snapshot.mqttKey) : undefined;
+                if (snapshot && device) {
+                    if (route.suffix.endsWith("/set")) {
+                        this.handlers.onLearnedTrajectoryRangeSetResult?.(device.id, snapshot);
+                    }
+                    else {
+                        this.handlers.onLearnedTrajectoryRangeQueryResult?.(device.id, snapshot);
+                    }
+                }
+                return;
+            }
         });
     }
     setDevices(devices) {
@@ -234,6 +300,35 @@ class MqttBridge {
             hex: payload.hex,
         }, 1, false);
     }
+    publishLearnedTrajectoryRangeSetCommand(device, payload) {
+        const profile = (0, registry_1.getMmwaveProfile)(device.profileId);
+        const suffix = profile?.mqttTopics.learnedTrajectoryRangeSetCommandTopic;
+        const topic = suffix ? this.buildTopic(device, suffix) : null;
+        return topic
+            ? this.publishJson(topic, {
+                schema: 1,
+                type: "learned_trajectory_range",
+                device_topic_prefix: device.mqttTopicPrefix,
+                mqtt_key: device.mqttKey,
+                request_id: payload.request_id,
+                learning_enabled: payload.learning_enabled,
+            }, 1, false)
+            : false;
+    }
+    publishLearnedTrajectoryRangeQueryCommand(device, payload) {
+        const profile = (0, registry_1.getMmwaveProfile)(device.profileId);
+        const suffix = profile?.mqttTopics.learnedTrajectoryRangeQueryCommandTopic;
+        const topic = suffix ? this.buildTopic(device, suffix) : null;
+        return topic
+            ? this.publishJson(topic, {
+                schema: 1,
+                type: "learned_trajectory_range_query",
+                device_topic_prefix: device.mqttTopicPrefix,
+                mqtt_key: device.mqttKey,
+                request_id: payload.request_id,
+            }, 1, false)
+            : false;
+    }
     findDeviceByRoute(topicPrefix, mqttKey) {
         return this.devices.find((entry) => entry.mqttTopicPrefix === topicPrefix && entry.mqttKey === mqttKey);
     }
@@ -258,6 +353,9 @@ class MqttBridge {
                 profile.mqttTopics.tagEventStateTopic,
                 profile.mqttTopics.multiTagConfigResultTopic,
                 profile.mqttTopics.configFileRangeResultTopic,
+                profile.mqttTopics.learnedTrajectoryRangeStateTopic,
+                profile.mqttTopics.learnedTrajectoryRangeSetResultTopic,
+                profile.mqttTopics.learnedTrajectoryRangeQueryResultTopic,
             ];
             for (const suffix of topics) {
                 if (!suffix) {
