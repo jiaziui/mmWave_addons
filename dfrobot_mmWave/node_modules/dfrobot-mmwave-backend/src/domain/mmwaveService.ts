@@ -1259,4 +1259,49 @@ export class MmwaveService {
     }
     pending.reject(new Error(snapshot.error || "Config file range rejected by device"));
   }
+
+  handleLearnedTrajectoryRangeState(deviceId: string, snapshot: LearnedTrajectoryRangeSnapshot): void {
+    const device = this.storage.getDevice(deviceId);
+    if (!device) {
+      return;
+    }
+    this.runtimeCache.ensureDevice(device);
+    const current = this.runtimeCache.getLearnedRange(deviceId);
+    this.runtimeCache.updateLearnedRange(deviceId, {
+      learningEnabled: snapshot.learningEnabled,
+      pointCount: snapshot.learningEnabled ? 0 : snapshot.pointCount,
+      status: snapshot.learningEnabled ? "learning" : (current?.status === "querying" ? "querying" : current?.status ?? "idle"),
+    });
+    this.notifyRuntime(deviceId);
+  }
+
+  handleLearnedTrajectoryRangeSetResult(deviceId: string, snapshot: LearnedTrajectoryRangeResultSnapshot): void {
+    if (!snapshot.requestId) {
+      return;
+    }
+    const pending = this.pendingLearnedRangeSet.get(snapshot.requestId);
+    if (!pending || pending.deviceId !== deviceId) {
+      return;
+    }
+    if (snapshot.ok) {
+      pending.resolve(snapshot);
+    } else {
+      pending.reject(new Error(snapshot.error || "Learned range command rejected by device"));
+    }
+  }
+
+  handleLearnedTrajectoryRangeQueryResult(deviceId: string, snapshot: LearnedTrajectoryRangeResultSnapshot): void {
+    if (!snapshot.requestId) {
+      return;
+    }
+    const pending = this.pendingLearnedRangeQuery.get(snapshot.requestId);
+    if (!pending || pending.deviceId !== deviceId) {
+      return;
+    }
+    if (snapshot.ok) {
+      pending.resolve(snapshot);
+    } else {
+      pending.reject(new Error(snapshot.error || "Learned range query rejected by device"));
+    }
+  }
 }
