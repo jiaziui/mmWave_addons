@@ -297,6 +297,7 @@ exports.c4004ProfileAdapter = {
         supportsRegions: true,
         supportsInitializeWorkflow: true,
         supportsReset: true,
+        supportsFactoryReset: true,
         supportsMqttBridge: true,
     },
     mqttTopics: {
@@ -495,5 +496,8 @@ exports.c4004ProfileAdapter = {
     },
     resetDevice: async (client, device) => {
         await (0, profileRuntime_1.writeC4004Entity)(client, device, "reset");
+    },
+    factoryResetDevice: async (client, device) => {
+        await (0, profileRuntime_1.writeC4004Entity)(client, device, "factoryReset");
     },
 };

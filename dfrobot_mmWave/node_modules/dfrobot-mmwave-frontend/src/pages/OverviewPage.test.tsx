@@ -37,10 +37,6 @@ describe("OverviewPage", () => {
     const { container } = render(<OverviewPage
       metrics={{ deviceCount: 1, peopleCount: 2, targetCount: 1, staticCount: 1 }}
       devices={[device]}
-      busy={false}
-      stale
-      onRefresh={vi.fn()}
-      onAddDevice={vi.fn()}
       onOpenDevice={vi.fn()}
     />);
 
@@ -48,7 +44,6 @@ describe("OverviewPage", () => {
     expect(screen.getByText("厨房")).toBeInTheDocument();
     expect(container.querySelectorAll(".target-point")).toHaveLength(0);
     expect(screen.getByText("总人数 2")).toBeInTheDocument();
-    expect(screen.getByText("数据可能已过期")).toBeInTheDocument();
     expect(screen.getByText("当前总人数").parentElement).toHaveTextContent("2人");
   });
 });

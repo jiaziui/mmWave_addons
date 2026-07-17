@@ -11,34 +11,14 @@ const stats = [
 export function OverviewPage({
   metrics,
   devices,
-  busy,
-  stale,
-  onRefresh,
-  onAddDevice,
   onOpenDevice,
 }: {
   metrics: MmwaveOverviewMetrics;
   devices: MmwaveOverviewDeviceCard[];
-  busy: boolean;
-  stale: boolean;
-  onRefresh: () => void;
-  onAddDevice: () => void;
   onOpenDevice: (deviceId: string) => void;
 }) {
   return (
     <section className="page overview-page">
-      <header className="page-header">
-        <div>
-          <p className="eyebrow">Overview</p>
-          <h2>设备总览</h2>
-        </div>
-        <div className="page-actions">
-          {stale ? <span className="data-stale-badge">数据可能已过期</span> : null}
-          <button type="button" className="ghost-button" onClick={onRefresh} disabled={busy}>刷新总览</button>
-          <button type="button" className="primary-button" onClick={onAddDevice}>添加设备</button>
-        </div>
-      </header>
-
       <div className="stats-grid">
         {stats.map((item) => (
           <article className="stat-card" key={item.key}>

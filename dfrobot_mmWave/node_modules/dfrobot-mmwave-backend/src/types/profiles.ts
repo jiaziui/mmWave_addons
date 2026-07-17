@@ -1,6 +1,7 @@
+/** Known built-in runtime adapters. Discovery also accepts any id from config/device/*.json. */
 export const MMWAVE_PROFILE_IDS = ["c4004"] as const;
 
-export type MmwaveProfileId = (typeof MMWAVE_PROFILE_IDS)[number];
+export type MmwaveProfileId = string;
 export type StoredMmwaveProfileId = MmwaveProfileId | "unknown";
 export type ProfileSource = "metadata" | "marker" | "override" | "signature";
 export type ProfileStatus = "resolved" | "unresolved" | "unsupported";
@@ -10,6 +11,7 @@ export interface ProfileCapabilities {
   supportsRegions: boolean;
   supportsInitializeWorkflow: boolean;
   supportsReset: boolean;
+  supportsFactoryReset?: boolean;
   supportsMqttBridge: boolean;
 }
 
@@ -31,7 +33,7 @@ export interface ProfileMqttTopics {
 }
 
 export const isMmwaveProfileId = (value: unknown): value is MmwaveProfileId =>
-  typeof value === "string" && MMWAVE_PROFILE_IDS.includes(value as MmwaveProfileId);
+  typeof value === "string" && value.trim().length > 0 && value !== "unknown";
 
 export const isStoredMmwaveProfileId = (value: unknown): value is StoredMmwaveProfileId =>
   value === "unknown" || isMmwaveProfileId(value);

@@ -28,6 +28,7 @@ COPY --from=build /app/backend/package.json /app/backend/package.json
 COPY --from=build /app/backend/dist /app/backend/dist
 COPY --from=build /app/frontend/dist /app/frontend/dist
 COPY config.yaml /app/config.yaml
+COPY config/device /app/config/device
 COPY rootfs/ /
 
 RUN chmod +x /etc/s6-overlay/s6-rc.d/mmwave-web-ui/run

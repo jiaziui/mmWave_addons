@@ -433,6 +433,8 @@ export const refreshDevice = async (deviceId: string): Promise<{ ok: boolean; de
   localMockEnabled() ? (await mockApi()).mockFetchDetail(deviceId) : postDeviceAction(deviceId, "refresh");
 export const resetDevice = async (deviceId: string): Promise<{ ok: boolean; detail: MmwaveDeviceDetail }> =>
   localMockEnabled() ? (await mockApi()).mockFetchDetail(deviceId) : postDeviceAction(deviceId, "reset");
+export const factoryResetDevice = async (deviceId: string): Promise<{ ok: boolean; config: MmwaveDeviceConfig }> =>
+  localMockEnabled() ? (await mockApi()).mockFactoryResetDevice(deviceId) : postDeviceAction(deviceId, "factory-reset");
 export const unbindDevice = async (deviceId: string): Promise<{ ok: boolean; devices: StoredMmwaveDevice[] }> =>
   localMockEnabled() ? (await mockApi()).mockUnbind(deviceId) : postDeviceAction(deviceId, "unbind");
 export const initializeDevice = async (

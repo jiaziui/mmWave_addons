@@ -291,6 +291,15 @@ export const createMmwaveRouter = (service: MmwaveService): Router => {
     }
   });
 
+  router.post("/devices/:deviceId/actions/factory-reset", async (req, res) => {
+    try {
+      res.json({ ok: true, config: await service.factoryResetDevice(req.params.deviceId) });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to factory reset device";
+      res.status(message === "Device not found" ? 404 : 502).json({ ok: false, error: message });
+    }
+  });
+
   router.post("/devices/:deviceId/actions/unbind", async (req, res) => {
     try {
       res.json({ ok: true, devices: await service.unbindDevice(req.params.deviceId) });

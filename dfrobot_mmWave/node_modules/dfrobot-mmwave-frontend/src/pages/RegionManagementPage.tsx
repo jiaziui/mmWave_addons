@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   deleteUserBaseMap,
+  factoryResetDevice,
   fetchDeviceConfig,
   fetchDeviceDetail,
   fetchUserBaseMaps,
@@ -159,12 +160,14 @@ export function RegionManagementPage({
   onSelectDevice,
   onMessage,
   onError,
+  sidebarToggle,
 }: {
   devices: StoredMmwaveDevice[];
   selectedDeviceId: string | null;
   onSelectDevice: (deviceId: string) => void;
   onMessage: (message: string) => void;
   onError: (message: string) => void;
+  sidebarToggle?: ReactNode;
 }) {
   const boundDevices = devices.filter((device) => device.initialized && device.deviceNo);
   const selectedDevice = boundDevices.find((device) => device.id === selectedDeviceId) ?? boundDevices[0] ?? null;
@@ -200,6 +203,8 @@ export function RegionManagementPage({
   const canvasRef = useRef<SVGSVGElement>(null);
   const baseMapLibraryRef = useRef<HTMLDivElement>(null);
   const sideColumnRef = useRef<HTMLDivElement>(null);
+  const menuWrapRef = useRef<HTMLDivElement>(null);
+  const devicePickerWrapRef = useRef<HTMLDivElement>(null);
   const configRef = useRef<MmwaveDeviceConfig | null>(null);
   const detailLoadingRef = useRef(false);
   const detailRefreshPendingRef = useRef(false);
@@ -659,6 +664,38 @@ export function RegionManagementPage({
     await updateSettings({ ...(deviceConfig.deviceSettings ?? {}) });
   };
 
+  const handleFactoryReset = async () => {
+    if (!selectedDevice || !deviceConfig || readOnly) return;
+    const targetDeviceId = selectedDevice.id;
+    setSaving(true);
+    try {
+      const response = await factoryResetDevice(targetDeviceId);
+      if (activeDeviceIdRef.current !== targetDeviceId) return;
+      setCurrentConfig(response.config);
+      setDetail((current) =>
+        current
+          ? {
+              ...current,
+              regions: [],
+              detection: response.config.regionConfig.detection,
+              rangeBox: response.config.regionConfig.rangeBox,
+            }
+          : current,
+      );
+      setDirty(false);
+      clearRegionEditSession();
+      setActivePanel(null);
+      onMessage("已恢复出厂并同步配置");
+      void refreshDetail();
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "恢复出厂设置失败");
+    } finally {
+      if (activeDeviceIdRef.current === targetDeviceId) {
+        setSaving(false);
+      }
+    }
+  };
+
   const clearRegionEditSession = () => {
     regionEditBaselineRef.current = null;
     regionEditIsNewRef.current = false;
@@ -1095,6 +1132,21 @@ export function RegionManagementPage({
   }, [activePanel, backgroundCatalog.length, backgroundFilter, visibleBackgroundCatalog.length]);
 
   useEffect(() => {
+    if (!menuOpen && !devicePickerOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (menuOpen && !(target && menuWrapRef.current?.contains(target))) {
+        setMenuOpen(false);
+      }
+      if (devicePickerOpen && !(target && devicePickerWrapRef.current?.contains(target))) {
+        setDevicePickerOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [menuOpen, devicePickerOpen]);
+
+  useEffect(() => {
     const column = sideColumnRef.current;
     if (!column) return;
     const stopWheelBubble = (event: WheelEvent) => {
@@ -1502,10 +1554,33 @@ export function RegionManagementPage({
   };
 
   if (!selectedDevice) {
-    return <section className="page"><div className="empty-state"><strong>暂无已绑定设备</strong><span>请先在设备管理中完成扫描和初始化。</span></div></section>;
+    return (
+      <section className="page region-page">
+        <header className="page-header region-page-header">
+          <div className="region-page-title-row">
+            {sidebarToggle}
+            <h2>区域管理</h2>
+          </div>
+        </header>
+        <div className="empty-state"><strong>暂无已绑定设备</strong><span>请先在设备管理中完成扫描和初始化。</span></div>
+      </section>
+    );
   }
   if (!regionConfig || loading) {
-    return <section className="page"><div className="empty-state"><strong>正在加载区域配置</strong><span>{selectedDevice.name}</span></div></section>;
+    return (
+      <section className="page region-page">
+        <header className="page-header region-page-header">
+          <div className="region-page-title-row">
+            {sidebarToggle}
+            <h2>区域管理</h2>
+            <div className="region-device-picker">
+              <span className="region-device-name">{selectedDevice.name}</span>
+            </div>
+          </div>
+        </header>
+        <div className="empty-state"><strong>正在加载区域配置</strong><span>{selectedDevice.name}</span></div>
+      </section>
+    );
   }
 
   const detection = regionConfig.detection;
@@ -1550,10 +1625,11 @@ export function RegionManagementPage({
     <section className="page region-page">
       <header className="page-header region-page-header">
         <div className="region-page-title-row">
+          {sidebarToggle}
           <h2>区域管理</h2>
           <div className="region-device-picker">
             <span className="region-device-name">{selectedDevice.name}{readOnly ? "（离线）" : ""}</span>
-            <div className="region-deviceno-wrap">
+            <div className="region-deviceno-wrap" ref={devicePickerWrapRef}>
               <button type="button" className="region-deviceno-btn" aria-expanded={devicePickerOpen} onClick={() => setDevicePickerOpen((value) => !value)}>
                 <span className="region-deviceno-btn-label">设备号 <strong>{selectedDevice.deviceNo}</strong></span>
                 <svg className="region-deviceno-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
@@ -1570,7 +1646,7 @@ export function RegionManagementPage({
         </div>
         <div className="page-actions">
           {saving ? <span className="save-state">保存中...</span> : dirty ? <span className="save-state pending">存在未保存修改</span> : null}
-          <div className="region-menu-wrap">
+          <div className="region-menu-wrap" ref={menuWrapRef}>
             <button type="button" className="region-menu-btn" aria-label="更多操作" onClick={() => setMenuOpen((value) => !value)}>⋯</button>
             {menuOpen ? <div className="region-dropdown">
               <button type="button" disabled={readOnly} onClick={() => handleMenuAction("import-image")}>导入图片</button>
@@ -1866,7 +1942,7 @@ export function RegionManagementPage({
             </section>
             <section className="parameter-section"><h4>上报与轨迹参数</h4><div className="region-form-grid">{parameterFields.map((field) => <label key={`${selectedDevice.id}-${field.key}-${deviceConfig?.deviceSettings[field.key] ?? PARAM_DEFAULTS[field.key]}`}><span>{field.label}</span><input disabled={readOnly || saving} type="number" min={field.min} max={field.max} defaultValue={deviceConfig?.deviceSettings[field.key] ?? PARAM_DEFAULTS[field.key]} onBlur={(event) => void updateSettings({ [field.key]: Math.max(field.min, Math.min(field.max, Number(event.target.value))) })} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} /></label>)}</div></section>
             <div className="region-param-footer">
-              <button type="button" className="primary-button region-reset-params-btn" disabled={readOnly || saving} onClick={() => void updateSettings(PARAM_DEFAULTS)}>恢复默认参数设置</button>
+              <button type="button" className="primary-button region-reset-params-btn" disabled={readOnly || saving} onClick={() => void handleFactoryReset()}>恢复出厂设置</button>
             </div>
           </> : null}
 
@@ -1965,7 +2041,7 @@ export function RegionManagementPage({
 
           {activePanel === "detection" ? <>
             <div className="region-panel-head"><div><h3>探测范围</h3></div></div>
-            <p className="region-range-hint">{getDetectionHint(detection)}</p>
+            {detection.mode !== "rect" && detection.mode !== "learned" ? <p className="region-range-hint">{getDetectionHint(detection)}</p> : null}
             <div className="detection-mode-tabs">{(["rect", "learned", "custom"] as const).map((mode) => <button type="button" key={mode} className={detection.mode === mode ? "active" : ""} disabled={readOnly && mode !== detection.mode} onClick={() => {
               if (learningLocked && mode !== "learned") {
                 onError("学习探测范围进行中，请先关闭学习后再切换探测范围。");
@@ -2015,19 +2091,6 @@ export function RegionManagementPage({
               <div className="region-range-switch-row">
                 <div>
                   <strong>开始学习探测范围</strong>
-                  <small>
-                    {learnedRange?.status === "confirming_single_target"
-                      ? `已确认 ${learnedRange.singleTargetConfirmCount}/3`
-                      : learnedRange?.status === "starting"
-                        ? "正在启动学习"
-                        : learnedRange?.status === "learning"
-                          ? "学习进行中"
-                          : learnedRange?.status === "stopping"
-                            ? "正在停止学习"
-                            : learnedRange?.status === "querying"
-                              ? "正在读取学习结果"
-                              : "开始前需要连续确认 3 帧单目标"}
-                  </small>
                 </div>
                 <button
                   type="button"
@@ -2051,7 +2114,7 @@ export function RegionManagementPage({
                   </button>
                 </div>
               ) : null}
-              <p className="region-range-hint">开始时会先把设备范围扩展到 X -5~5m、Y 0~8m，再确认 3 帧单目标；学习期间不显示中途坐标。</p>
+              <p className="region-range-hint">开始时会先把设备范围扩展到 X -5~5m、Y 0~8m，再确认单个目标轨迹；学习期间不显示中途坐标。</p>
             </> : null}
             {detection.mode === "custom" ? <><div className="custom-range-status">{getDetectionHint(detection)}</div><div className="region-panel-actions region-panel-actions-stacked"><div className="region-panel-actions-row"><button type="button" disabled={readOnly || detection.customPointsCm.length === 0} onClick={() => { const next = cloneConfig(regionConfig); next.detection.customPointsCm.pop(); setCurrentConfig({ ...deviceConfig!, regionConfig: next }); setDirty(true); }}>撤销</button><button type="button" disabled={readOnly || detection.customPointsCm.length === 0} onClick={() => { const next = cloneConfig(regionConfig); next.detection.customPointsCm = []; next.detection.customConfirmed = false; setCurrentConfig({ ...deviceConfig!, regionConfig: next }); setDirty(true); }}>清除</button></div><div className="region-panel-actions-row"><button type="button" className="primary-button" disabled={readOnly || saving || !canConfirmCustomRange(detection.customPointsCm)} onClick={() => {
               void (async () => {

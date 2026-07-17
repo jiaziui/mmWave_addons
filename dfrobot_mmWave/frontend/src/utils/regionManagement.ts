@@ -170,7 +170,7 @@ export const getDetectionHint = (detection: DetectionRangeConfig) => {
     return "在右侧坐标轴拖拽矩形边角调整四方范围，完成后点击设置。";
   }
   if (detection.mode === "learned") {
-    return "右侧显示已学习范围，点击设置启用。";
+    return "";
   }
   if (detection.customConfirmed) {
     return `已确认 ${detection.customPointsCm.length} 点，点击设置启用。`;

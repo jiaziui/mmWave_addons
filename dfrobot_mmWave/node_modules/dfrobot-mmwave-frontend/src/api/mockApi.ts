@@ -701,6 +701,52 @@ export const mockUpdateConfig = async (
   };
 };
 
+export const mockFactoryResetDevice = async (
+  deviceId: string,
+): Promise<{ ok: boolean; config: MmwaveDeviceConfig }> => {
+  const device = devices.find((entry) => entry.id === deviceId);
+  if (!device) throw new Error("Mock device not found");
+  if (device.discovery.status !== "online") {
+    throw new Error("设备离线，无法恢复出厂设置");
+  }
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  // 模拟出厂后从设备拉取的默认探测范围
+  const factoryRangeBox = { xMin: -3, xMax: 3, yMin: 0, yMax: 6 };
+  const current = regionConfigs[deviceId] ?? device.regionConfig;
+  regionConfigs[deviceId] = {
+    ...structuredClone(current),
+    rangeBox: factoryRangeBox,
+    detection: {
+      mode: "rect",
+      appliedMode: "rect",
+      rectCm: { xMin: -300, xMax: 300, yMin: 0, yMax: 600 },
+      learnedPointsCm: [],
+      customPointsCm: [],
+      customConfirmed: false,
+    },
+    regions: [],
+    syncState: {
+      fourSidedRange: "synced",
+      regionMcuIo: "synced",
+      tagConfig: "synced",
+      customRange: "synced",
+      learnedRange: "synced",
+      updatedAt: new Date().toISOString(),
+    },
+  };
+  device.regionConfig = regionConfigs[deviceId];
+  device.deviceSettings = {
+    trajectoryLed: true,
+    motionLed: true,
+    realTimePeopleTime: 2,
+    trackMeters: 50,
+    trackExistsTime: 10,
+    unmannedTime: 5,
+    checkToActiveFrames: 3,
+  };
+  return { ok: true, config: structuredClone(configFor(device)) };
+};
+
 export const mockInitializeDevice = async (
   deviceId: string,
   payload: {

@@ -619,6 +619,78 @@ export class MmwaveService {
     return this.getDeviceDetail(deviceId);
   }
 
+  async factoryResetDevice(deviceId: string): Promise<MmwaveDeviceConfig> {
+    let device = this.storage.getDevice(deviceId);
+    if (!device) {
+      throw new Error("Device not found");
+    }
+    if (!this.haClient) {
+      throw new Error("Home Assistant is not linked");
+    }
+    const profile = getMmwaveProfile(device.profileId);
+    if (!profile?.factoryResetDevice) {
+      throw new Error("当前设备不支持恢复出厂设置");
+    }
+
+    await profile.factoryResetDevice(this.haClient, device);
+
+    // 设备侧区域会随出厂自动清空；0.5s 后只同步本地方探测范围/参数，并清空后端本地 regions（不推送区域到设备）。
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    try {
+      const [states, entityRegistryEntries] = await Promise.all([
+        this.haClient.getAllStates(),
+        this.haClient.getEntityRegistry(),
+      ]);
+      const statesById = new Map(states.map((s) => [s.entity_id, s]));
+      const deviceStatesById = this.mapDeviceStates(device, statesById, entityRegistryEntries);
+
+      const runtimeState = profile.buildRuntimeState?.(device, deviceStatesById);
+      const rangeBox = runtimeState?.regionConfig?.rangeBox ?? device.regionConfig.rangeBox;
+
+      const clearedRegionConfig: StoredRegionConfig = {
+        ...device.regionConfig,
+        rangeBox,
+        detection: {
+          mode: "rect",
+          appliedMode: "rect",
+          rectCm: {
+            xMin: Math.round(rangeBox.xMin * 100),
+            xMax: Math.round(rangeBox.xMax * 100),
+            yMin: Math.round(rangeBox.yMin * 100),
+            yMax: Math.round(rangeBox.yMax * 100),
+          },
+          learnedPointsCm: [],
+          customPointsCm: [],
+          customConfirmed: false,
+        },
+        // 仅清本地标签区域；整体区域由 UI + zone1McuIo 表达，不在 regions[]。底图保留。
+        regions: [],
+        syncState: {
+          ...device.regionConfig.syncState,
+          fourSidedRange: "synced",
+          customRange: "synced",
+          learnedRange: "synced",
+          regionMcuIo: "synced",
+          tagConfig: "synced",
+          updatedAt: new Date().toISOString(),
+        },
+      };
+
+      device = this.storage.updateRegionConfig(deviceId, clearedRegionConfig);
+      this.runtimeCache.updateNative(device, { regionConfig: clearedRegionConfig });
+
+      if (profile.readDeviceSettings) {
+        const syncedSettings = profile.readDeviceSettings(device, deviceStatesById);
+        device = this.storage.updateDeviceSettings(deviceId, syncedSettings);
+      }
+    } catch (error) {
+      this.logger.warn({ deviceId, error }, "Failed to sync after factory reset, returning current config");
+    }
+
+    return buildDeviceConfig(this.runtimeCache.hydrateDevice(device));
+  }
+
   async getDeviceConfig(deviceId: string): Promise<MmwaveDeviceConfig> {
     const device = this.storage.getDevice(deviceId);
     if (!device) {

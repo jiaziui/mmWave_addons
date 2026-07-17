@@ -6,7 +6,6 @@ import {
   fetchDevices,
   fetchOverview,
   initializeDevice as submitInitializeDevice,
-  isLocalMockMode,
   refreshDevice,
   resetDevice,
   unbindDevice,
@@ -40,6 +39,24 @@ type InitializeWizardState = {
   completed: boolean;
 };
 
+const CONSOLE_ENTERED_STORAGE_KEY = "dfrobot-mmwave-console-entered";
+
+const hasEnteredConsole = (): boolean => {
+  try {
+    return window.localStorage.getItem(CONSOLE_ENTERED_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+};
+
+const markConsoleEntered = (): void => {
+  try {
+    window.localStorage.setItem(CONSOLE_ENTERED_STORAGE_KEY, "1");
+  } catch {
+    // Ignore quota / private-mode failures; in-memory entered state still works for this session.
+  }
+};
+
 const navItems: Array<{ id: Exclude<View, "detail">; label: string; short: string }> = [
   { id: "overview", label: "设备总览", short: "OV" },
   { id: "device-management", label: "设备管理", short: "DM" },
@@ -62,7 +79,8 @@ const detectionModeLabels: Record<DetectionMode, { title: string; description: s
 };
 
 function App() {
-  const [entered, setEntered] = useState(false);
+  const [entered, setEntered] = useState(() => hasEnteredConsole());
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [view, setView] = useState<View>("overview");
   const [devices, setDevices] = useState<StoredMmwaveDevice[]>([]);
   const [metrics, setMetrics] = useState<MmwaveOverviewMetrics>({
@@ -169,6 +187,17 @@ function App() {
   useEffect(() => {
     void bootstrap();
   }, []);
+
+  useEffect(() => {
+    if (!message && !error) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setMessage("");
+      setError("");
+    }, 2000);
+    return () => window.clearTimeout(timer);
+  }, [message, error]);
 
   useEffect(() => {
     if (!entered || view !== "overview") {
@@ -483,7 +512,14 @@ function App() {
             <span>基于 Home Assistant 接口发现设备并提供刷新、重启入口。</span>
           </article>
         </div>
-        <button className="hero-button" type="button" onClick={() => setEntered(true)}>
+        <button
+          className="hero-button"
+          type="button"
+          onClick={() => {
+            markConsoleEntered();
+            setEntered(true);
+          }}
+        >
           进入控制台
         </button>
       </div>
@@ -491,7 +527,7 @@ function App() {
   );
 
   const renderSidebar = () => (
-    <aside className="sidebar">
+    <aside className="sidebar" aria-hidden={sidebarCollapsed}>
       <div className="sidebar-header">
         <div className="sidebar-logo">
           <img src="./ui_logo.svg" alt="DFRobot mmWave" className="brand-logo-image" />
@@ -506,37 +542,96 @@ function App() {
             onClick={() => setView(item.id)}
           >
             <span className="nav-badge">{item.short}</span>
-            <span>{item.label}</span>
+            <span className="nav-label">{item.label}</span>
           </button>
         ))}
       </nav>
-      <div className="sidebar-bottom">
-        {message ? <div className="notice notice-info sidebar-notice">{message}</div> : null}
-        {error ? <div className="notice notice-error sidebar-notice">{error}</div> : null}
-      </div>
     </aside>
+  );
+
+  const renderSidebarToggle = () => (
+    <button
+      type="button"
+      className="sidebar-toggle"
+      aria-label={sidebarCollapsed ? "展开侧栏" : "收起侧栏"}
+      aria-expanded={!sidebarCollapsed}
+      title={sidebarCollapsed ? "展开侧栏" : "收起侧栏"}
+      onClick={() => setSidebarCollapsed((value) => !value)}
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+        {sidebarCollapsed ? (
+          <path d="M4 6h16M4 12h16M4 18h16" />
+        ) : (
+          <>
+            <rect x="3" y="4" width="18" height="16" rx="2" />
+            <path d="M9 4v16" />
+          </>
+        )}
+      </svg>
+    </button>
+  );
+
+  const pageTitle = view === "overview"
+    ? "设备总览"
+    : view === "device-management"
+      ? "设备管理"
+      : view === "region-management"
+        ? "区域管理"
+        : (detail?.name ?? "设备详情");
+
+  const renderContentTopbar = () => (
+    <div className="content-topbar">
+      {renderSidebarToggle()}
+      <div className="content-topbar-title">
+        <h1>{pageTitle}</h1>
+        {view === "detail" && selectedDevice ? (
+          <span className="content-topbar-sub">设备号 {selectedDevice.deviceNo}</span>
+        ) : null}
+      </div>
+      <div className="content-topbar-actions page-actions">
+        {view === "overview" ? (
+          <>
+            {overviewStale ? <span className="data-stale-badge">数据可能已过期</span> : null}
+            <button type="button" className="ghost-button" onClick={() => void bootstrap()} disabled={busy}>
+              刷新总览
+            </button>
+            <button type="button" className="primary-button" onClick={() => setView("device-management")}>
+              添加设备
+            </button>
+          </>
+        ) : null}
+        {view === "device-management" ? (
+          <>
+            <button type="button" className="ghost-button" onClick={() => void handleRefreshDevices()} disabled={busy}>
+              刷新设备
+            </button>
+            <button type="button" className="primary-button" onClick={() => void handleDiscover()} disabled={busy}>
+              扫描设备
+            </button>
+          </>
+        ) : null}
+        {view === "detail" ? (
+          <>
+            <button type="button" className="ghost-button" onClick={() => setView("overview")}>
+              返回总览
+            </button>
+            <button type="button" className="ghost-button" onClick={() => setView("region-management")}>
+              区域配置
+            </button>
+            <button type="button" className="ghost-button" onClick={() => void handleRefreshDevice()} disabled={busy || !detail?.actions.canRefresh}>
+              刷新
+            </button>
+            <button type="button" className="primary-button" onClick={() => void handleResetDevice()} disabled={busy || !detail?.actions.canReset}>
+              重启设备
+            </button>
+          </>
+        ) : null}
+      </div>
+    </div>
   );
 
   const renderDetail = () => (
     <section className="page">
-      <header className="page-header">
-        <div>
-          <p className="eyebrow">Device Detail</p>
-          <h2>{detail?.name ?? "设备详情"}</h2>
-        </div>
-        <div className="page-actions">
-          <button type="button" className="ghost-button" onClick={() => setView("region-management")}>
-            区域配置
-          </button>
-          <button type="button" className="ghost-button" onClick={() => void handleRefreshDevice()} disabled={busy || !detail?.actions.canRefresh}>
-            刷新
-          </button>
-          <button type="button" className="primary-button" onClick={() => void handleResetDevice()} disabled={busy || !detail?.actions.canReset}>
-            重启设备
-          </button>
-        </div>
-      </header>
-
       {detail ? (
         <div className="detail-layout">
           <section className="panel detail-radar-panel">
@@ -609,20 +704,6 @@ function App() {
 
   const renderDeviceManagement = () => (
     <section className="page">
-      <header className="page-header">
-        <div>
-          <p className="eyebrow">Device Management</p>
-          <h2>设备管理</h2>
-        </div>
-        <div className="page-actions">
-          <button type="button" className="ghost-button" onClick={() => void handleRefreshDevices()} disabled={busy}>
-            刷新设备
-          </button>
-          <button type="button" className="primary-button" onClick={() => void handleDiscover()} disabled={busy}>
-            扫描设备
-          </button>
-        </div>
-      </header>
       <div className="stats-grid device-management-stats">
         <article className="stat-card">
           <span>扫描结果</span>
@@ -713,22 +794,24 @@ function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div className={sidebarCollapsed ? "app-shell is-sidebar-collapsed" : "app-shell"}>
+      {message || error ? (
+        <div
+          key={`${error ? "error" : "info"}:${error || message}`}
+          className={error ? "app-toast app-toast-error" : "app-toast app-toast-info"}
+          role="status"
+          aria-live="polite"
+        >
+          {error || message}
+        </div>
+      ) : null}
       {renderSidebar()}
       <main className="content-shell">
-        {isLocalMockMode() ? (
-          <div className="notice notice-info mock-mode-banner">
-            本地 Mock 模式：数据来自内存假接口，轨迹与区域状态每 2 秒自动刷新。厨房=四方范围，客厅=学习范围，书房=离线只读。
-          </div>
-        ) : null}
+        {view !== "region-management" ? renderContentTopbar() : null}
         {view === "overview" ? (
           <OverviewPage
             metrics={metrics}
             devices={overviewCards}
-            busy={busy}
-            stale={overviewStale}
-            onRefresh={() => void bootstrap()}
-            onAddDevice={() => setView("device-management")}
             onOpenDevice={handleOpenDevice}
           />
         ) : null}
@@ -741,6 +824,7 @@ function App() {
             onSelectDevice={setSelectedDeviceId}
             onMessage={setMessage}
             onError={setError}
+            sidebarToggle={renderSidebarToggle()}
           />
         ) : null}
       </main>

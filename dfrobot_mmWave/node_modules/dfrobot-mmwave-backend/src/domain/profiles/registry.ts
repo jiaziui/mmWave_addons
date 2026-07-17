@@ -5,32 +5,9 @@ import type { Logger } from "pino";
 import { isMmwaveProfileId, type MmwaveProfileId, type ProfileSource } from "../../types/profiles";
 import { c4004ProfileAdapter } from "./builtinProfiles";
 import type { MmwaveProfileAdapter, ProfileDiscoveryCandidate, ProfileDiscoveryContext } from "./contracts";
-import deviceProfileCatalog from "./deviceProfileCatalog.json";
+import { loadDeviceProfileDefinitions, type ProfileSignatureEntityDefinition } from "./loadDeviceProfileDefinitions";
 
-interface ProfileSignatureEntityDefinition {
-  domain: string;
-  slug: string;
-}
-
-interface ProfileCatalogDefinition {
-  id: MmwaveProfileId;
-  displayName: string;
-  metadataHints: string[];
-  markerValues: string[];
-  runtimeSupported: boolean;
-  capabilities: MmwaveProfileAdapter["capabilities"];
-  mqttTopics: MmwaveProfileAdapter["mqttTopics"];
-  entitySignature: {
-    minScore: number;
-    entities: ProfileSignatureEntityDefinition[];
-  };
-}
-
-interface ProfileCatalogFile {
-  profiles: ProfileCatalogDefinition[];
-}
-
-const PROFILE_DEFINITIONS = (deviceProfileCatalog as ProfileCatalogFile).profiles;
+const PROFILE_DEFINITIONS = loadDeviceProfileDefinitions();
 const RUNTIME_ADAPTER_BY_ID = new Map<MmwaveProfileId, MmwaveProfileAdapter>([
   [c4004ProfileAdapter.id, c4004ProfileAdapter],
 ]);
@@ -48,7 +25,10 @@ const PROFILES: MmwaveProfileAdapter[] = PROFILE_DEFINITIONS.map((definition) =>
     displayName: definition.displayName,
     metadataHints: definition.metadataHints,
     markerValues: definition.markerValues,
-    capabilities: definition.capabilities,
+    capabilities: {
+      ...runtimeAdapter?.capabilities,
+      ...definition.capabilities,
+    },
     mqttTopics: definition.mqttTopics,
     runtimeSupported: definition.runtimeSupported && Boolean(runtimeAdapter?.runtimeSupported),
     ...(getTrajectoryTopic ? { getTrajectoryTopic } : {}),

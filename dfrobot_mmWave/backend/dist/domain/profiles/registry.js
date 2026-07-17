@@ -1,13 +1,10 @@
 "use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.resolveDiscoveredProfiles = exports.buildProfileDiscoveryContext = exports.getMmwaveProfile = exports.listMmwaveProfiles = void 0;
 const profiles_1 = require("../../types/profiles");
 const builtinProfiles_1 = require("./builtinProfiles");
-const deviceProfileCatalog_json_1 = __importDefault(require("./deviceProfileCatalog.json"));
-const PROFILE_DEFINITIONS = deviceProfileCatalog_json_1.default.profiles;
+const loadDeviceProfileDefinitions_1 = require("./loadDeviceProfileDefinitions");
+const PROFILE_DEFINITIONS = (0, loadDeviceProfileDefinitions_1.loadDeviceProfileDefinitions)();
 const RUNTIME_ADAPTER_BY_ID = new Map([
     [builtinProfiles_1.c4004ProfileAdapter.id, builtinProfiles_1.c4004ProfileAdapter],
 ]);
@@ -22,7 +19,10 @@ const PROFILES = PROFILE_DEFINITIONS.map((definition) => {
         displayName: definition.displayName,
         metadataHints: definition.metadataHints,
         markerValues: definition.markerValues,
-        capabilities: definition.capabilities,
+        capabilities: {
+            ...runtimeAdapter?.capabilities,
+            ...definition.capabilities,
+        },
         mqttTopics: definition.mqttTopics,
         runtimeSupported: definition.runtimeSupported && Boolean(runtimeAdapter?.runtimeSupported),
         ...(getTrajectoryTopic ? { getTrajectoryTopic } : {}),

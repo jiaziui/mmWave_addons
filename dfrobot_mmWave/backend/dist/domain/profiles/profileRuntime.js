@@ -49,6 +49,7 @@ const entityDefinitions = [
     { key: "zone6McuIo", domain: "number", slug: "zone_6_mcu_io", aliases: ["zone_mcu_io6", "zone_mcu_io_6"], access: "readwrite" },
     { key: "setFourSidedRangeMode", domain: "button", slug: "set_four_sided_range_mode", access: "action" },
     { key: "reset", domain: "button", slug: "reset", access: "action" },
+    { key: "factoryReset", domain: "button", slug: "factory_reset", access: "action" },
 ];
 const toEntityId = (prefix, definition) => `${definition.domain}.${prefix}_${definition.slug}`;
 exports.toEntityId = toEntityId;

@@ -1,8 +1,9 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.isProfileStatus = exports.isProfileSource = exports.isStoredMmwaveProfileId = exports.isMmwaveProfileId = exports.MMWAVE_PROFILE_IDS = void 0;
+/** Known built-in runtime adapters. Discovery also accepts any id from config/device/*.json. */
 exports.MMWAVE_PROFILE_IDS = ["c4004"];
-const isMmwaveProfileId = (value) => typeof value === "string" && exports.MMWAVE_PROFILE_IDS.includes(value);
+const isMmwaveProfileId = (value) => typeof value === "string" && value.trim().length > 0 && value !== "unknown";
 exports.isMmwaveProfileId = isMmwaveProfileId;
 const isStoredMmwaveProfileId = (value) => value === "unknown" || (0, exports.isMmwaveProfileId)(value);
 exports.isStoredMmwaveProfileId = isStoredMmwaveProfileId;

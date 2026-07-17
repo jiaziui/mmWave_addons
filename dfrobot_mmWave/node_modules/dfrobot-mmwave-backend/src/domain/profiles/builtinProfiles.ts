@@ -393,6 +393,7 @@ export const c4004ProfileAdapter: MmwaveProfileAdapter = {
     supportsRegions: true,
     supportsInitializeWorkflow: true,
     supportsReset: true,
+    supportsFactoryReset: true,
     supportsMqttBridge: true,
   },
   mqttTopics: {
@@ -599,5 +600,8 @@ export const c4004ProfileAdapter: MmwaveProfileAdapter = {
   },
   resetDevice: async (client, device) => {
     await writeC4004Entity(client, device, "reset");
+  },
+  factoryResetDevice: async (client, device) => {
+    await writeC4004Entity(client, device, "factoryReset");
   },
 };
