@@ -97,5 +97,6 @@ export interface MmwaveProfileAdapter {
   initializeDevice?(client: HaClient, device: StoredMmwaveDevice, payload: InitializeDeviceInput): Promise<void>;
   resetDevice?(client: HaClient, device: StoredMmwaveDevice): Promise<void>;
   factoryResetDevice?(client: HaClient, device: StoredMmwaveDevice): Promise<void>;
+  clearPeopleCount?(client: HaClient, device: StoredMmwaveDevice): Promise<void>;
   getTrajectoryTopic?(device: StoredMmwaveDevice): string | null;
 }

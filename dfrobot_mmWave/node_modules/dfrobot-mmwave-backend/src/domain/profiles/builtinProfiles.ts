@@ -624,4 +624,7 @@ export const c4004ProfileAdapter: MmwaveProfileAdapter = {
   factoryResetDevice: async (client, device) => {
     await writeC4004Entity(client, device, "factoryReset");
   },
+  clearPeopleCount: async (client, device) => {
+    await writeC4004Entity(client, device, "clearPeopleCount");
+  },
 };

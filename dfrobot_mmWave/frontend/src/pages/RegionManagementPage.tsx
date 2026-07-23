@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
+  clearPeopleCount,
   deleteUserBaseMap,
   factoryResetDevice,
   fetchDeviceConfig,
@@ -59,6 +60,16 @@ type DragState =
   | { kind: "detection-resize"; pointerId: number; handle: "n" | "e" | "s" | "w" | "nw" | "ne" | "se" | "sw"; rect: { xMin: number; xMax: number; yMin: number; yMax: number } }
   | { kind: "background"; pointerId: number; instanceId: string; startWorldX: number; startWorldY: number; instance: BaseMapInstance }
   | {
+      kind: "background-pending";
+      pointerId: number;
+      startClientX: number;
+      startClientY: number;
+      startWorldX: number;
+      startWorldY: number;
+      dragInstance: BaseMapInstance;
+      cycleInstanceId: string;
+    }
+  | {
       kind: "background-resize";
       pointerId: number;
       instanceId: string;
@@ -80,6 +91,8 @@ type DragState =
 type BackgroundCornerHandle = "nw" | "ne" | "se" | "sw";
 
 const BG_MIN_SIZE_CM = 40;
+const BG_CLICK_MOVE_THRESHOLD_PX = 6;
+const BG_LONG_PRESS_MS = 280;
 
 const normalizeRotationDeg = (value: number) => {
   const normalized = ((value % 360) + 360) % 360;
@@ -116,17 +129,16 @@ const pointHitsBackground = (instance: BaseMapInstance, worldX: number, worldY: 
 };
 
 /**
- * Pick a background under the pointer. Hits are ordered top→bottom by zIndex.
- * If the current selection is already in the stack, advance to the next (cycle)
- * so overlapping images remain selectable. Only start drag when the pick stays
- * on the same instance (typically a single exclusive hit).
+ * Resolve backgrounds under the pointer. Hits are ordered top→bottom by zIndex.
+ * - dragInstance: keep current selection if still under the pointer, else topmost
+ * - cycleInstance: next layer for a short click (cycles when overlapping)
  */
-const pickBackgroundAtPoint = (
+const resolveBackgroundPointerHit = (
   instances: BaseMapInstance[],
   worldX: number,
   worldY: number,
   currentSelectedId: string | null,
-): { instance: BaseMapInstance; startDrag: boolean } | null => {
+): { dragInstance: BaseMapInstance; cycleInstance: BaseMapInstance } | null => {
   const hits = instances
     .filter((entry) => entry.visible && pointHitsBackground(entry, worldX, worldY))
     .sort((left, right) => right.zIndex - left.zIndex);
@@ -134,11 +146,9 @@ const pickBackgroundAtPoint = (
   const currentIndex = currentSelectedId
     ? hits.findIndex((entry) => entry.id === currentSelectedId)
     : -1;
-  const next = currentIndex < 0 ? hits[0] : hits[(currentIndex + 1) % hits.length];
-  return {
-    instance: next,
-    startDrag: Boolean(currentSelectedId && next.id === currentSelectedId),
-  };
+  const dragInstance = currentIndex >= 0 ? hits[currentIndex] : hits[0];
+  const cycleInstance = currentIndex < 0 ? hits[0] : hits[(currentIndex + 1) % hits.length];
+  return { dragInstance, cycleInstance };
 };
 
 /** Scale from image center; keep aspect ratio; support rotated images. */
@@ -325,6 +335,7 @@ export function RegionManagementPage({
   const [viewportOffset, setViewportOffset] = useState({ x: 0, y: 0 });
   const [canvasSize, setCanvasSize] = useState({ width: 1, height: 1 });
   const [dragState, setDragState] = useState<DragState>(null);
+  const dragStateRef = useRef<DragState>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const configImportRef = useRef<HTMLInputElement>(null);
   const pendingConfigImportType = useRef<"detection" | "regions" | null>(null);
@@ -341,6 +352,7 @@ export function RegionManagementPage({
   const viewportCenteredRef = useRef(false);
   const pointerMoveFrameRef = useRef<number | null>(null);
   const pendingPointerMoveRef = useRef<PointerMoveSample | null>(null);
+  const backgroundPressTimerRef = useRef<number | null>(null);
   const regionEditBaselineRef = useRef<RegionDefinition | null>(null);
   const regionEditIsNewRef = useRef(false);
   const dirtyBeforeRegionEditRef = useRef(false);
@@ -1118,9 +1130,40 @@ export function RegionManagementPage({
     }
   };
 
-  const handleMenuAction = (action: "import-image" | "import-detection" | "export-detection" | "import-regions" | "export-regions") => {
+  const handleMenuAction = (
+    action:
+      | "import-image"
+      | "import-detection"
+      | "export-detection"
+      | "import-regions"
+      | "export-regions"
+      | "clear-people-count",
+  ) => {
     setMenuOpen(false);
     if (!selectedDevice || !regionConfig) return;
+    if (action === "clear-people-count") {
+      if (readOnly) {
+        onError("该设备已离线，暂时无法清除人数");
+        return;
+      }
+      void (async () => {
+        const targetDeviceId = selectedDevice.id;
+        setSaving(true);
+        try {
+          const response = await clearPeopleCount(targetDeviceId);
+          if (activeDeviceIdRef.current !== targetDeviceId) return;
+          setDetail(response.detail);
+          onMessage("已清除人数");
+        } catch (error) {
+          onError(error instanceof Error ? error.message : "清除人数失败");
+        } finally {
+          if (activeDeviceIdRef.current === targetDeviceId) {
+            setSaving(false);
+          }
+        }
+      })();
+      return;
+    }
     if (action === "import-image") {
       fileInputRef.current?.click();
       return;
@@ -1241,7 +1284,7 @@ export function RegionManagementPage({
     if (saved) {
       setSelectedBackgroundId(instanceId);
       setBackgroundVisible(true);
-      setBackgroundMessage("已添加（统一宽约 2m）。拖动/四角缩放/旋转手柄调整，Delete 删除；重叠处点击可切换选中");
+      setBackgroundMessage("已添加（统一宽约 2m）。短按切换重叠层，拖动/长按移动，四角缩放/旋转，Delete 删除");
       onMessage("底图已添加到当前设备画布");
     }
   };
@@ -1376,6 +1419,35 @@ export function RegionManagementPage({
     setDirty(true);
   };
 
+  const applyDragState = (next: DragState) => {
+    dragStateRef.current = next;
+    setDragState(next);
+  };
+
+  const clearBackgroundPressTimer = () => {
+    if (backgroundPressTimerRef.current !== null) {
+      window.clearTimeout(backgroundPressTimerRef.current);
+      backgroundPressTimerRef.current = null;
+    }
+  };
+
+  const promoteBackgroundPending = (
+    pending: Extract<DragState, { kind: "background-pending" }>,
+  ): Extract<DragState, { kind: "background" }> => {
+    clearBackgroundPressTimer();
+    setSelectedBackgroundId(pending.dragInstance.id);
+    const promoted = {
+      kind: "background" as const,
+      pointerId: pending.pointerId,
+      instanceId: pending.dragInstance.id,
+      startWorldX: pending.startWorldX,
+      startWorldY: pending.startWorldY,
+      instance: structuredClone(pending.dragInstance),
+    };
+    applyDragState(promoted);
+    return promoted;
+  };
+
   const handlePointerDown = (event: React.PointerEvent<SVGSVGElement>) => {
     if (!regionConfig) return;
     touchPointsRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
@@ -1402,7 +1474,7 @@ export function RegionManagementPage({
     const backgroundRotate = target.closest<SVGElement>("[data-bg-rotate]");
     const backgroundResize = target.closest<SVGElement>("[data-bg-resize]");
     if (!readOnly && activePanel === "detection" && detectionResize && regionConfig.detection.mode === "rect") {
-      setDragState({
+      applyDragState({
         kind: "detection-resize",
         pointerId: event.pointerId,
         handle: detectionResize.dataset.detectionHandle as "n" | "e" | "s" | "w" | "nw" | "ne" | "se" | "sw",
@@ -1418,7 +1490,7 @@ export function RegionManagementPage({
         } else {
           selectRegion(region);
         }
-        setDragState({
+        applyDragState({
           kind: "region-resize",
           pointerId: event.pointerId,
           regionId: region.id,
@@ -1436,7 +1508,7 @@ export function RegionManagementPage({
         } else {
           selectRegion(region);
         }
-        setDragState({
+        applyDragState({
           kind: "region",
           pointerId: event.pointerId,
           regionId: region.id,
@@ -1451,7 +1523,7 @@ export function RegionManagementPage({
         setSelectedBackgroundId(instance.id);
         const centerXCm = instance.xCm + instance.widthCm / 2;
         const centerYCm = instance.yCm + instance.heightCm / 2;
-        setDragState({
+        applyDragState({
           kind: "background-rotate",
           pointerId: event.pointerId,
           instanceId: instance.id,
@@ -1465,7 +1537,7 @@ export function RegionManagementPage({
       const handle = backgroundResize.dataset.handle as BackgroundCornerHandle | undefined;
       if (instance && handle && ["nw", "ne", "se", "sw"].includes(handle)) {
         setSelectedBackgroundId(instance.id);
-        setDragState({
+        applyDragState({
           kind: "background-resize",
           pointerId: event.pointerId,
           instanceId: instance.id,
@@ -1476,27 +1548,40 @@ export function RegionManagementPage({
         });
       }
     } else if (!readOnly && activePanel === "background") {
-      // 几何命中 + 重叠循环选中（不依赖 SVG 最上层 DOM）
-      const picked = pickBackgroundAtPoint(
+      // 短按切换重叠层；拖动/长按移动当前命中的已选（或最上层）底图
+      const hit = resolveBackgroundPointerHit(
         regionConfig.backgroundInstances,
         world.x,
         world.y,
         selectedBackgroundId,
       );
-      if (picked) {
-        setSelectedBackgroundId(picked.instance.id);
-        if (picked.startDrag) {
-          setDragState({
-            kind: "background",
-            pointerId: event.pointerId,
-            instanceId: picked.instance.id,
-            startWorldX: world.x,
-            startWorldY: world.y,
-            instance: structuredClone(picked.instance),
-          });
-        }
+      if (hit) {
+        clearBackgroundPressTimer();
+        const pending = {
+          kind: "background-pending" as const,
+          pointerId: event.pointerId,
+          startClientX: event.clientX,
+          startClientY: event.clientY,
+          startWorldX: world.x,
+          startWorldY: world.y,
+          dragInstance: structuredClone(hit.dragInstance),
+          cycleInstanceId: hit.cycleInstance.id,
+        };
+        applyDragState(pending);
+        backgroundPressTimerRef.current = window.setTimeout(() => {
+          backgroundPressTimerRef.current = null;
+          const current = dragStateRef.current;
+          if (
+            !current
+            || current.kind !== "background-pending"
+            || current.pointerId !== pending.pointerId
+          ) {
+            return;
+          }
+          promoteBackgroundPending(current);
+        }, BG_LONG_PRESS_MS);
       } else {
-        setDragState({ kind: "pan", pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, offsetX: viewportOffset.x, offsetY: viewportOffset.y });
+        applyDragState({ kind: "pan", pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, offsetX: viewportOffset.x, offsetY: viewportOffset.y });
       }
     } else if (!readOnly && activePanel === "detection" && regionConfig.detection.mode === "custom" && !regionConfig.detection.customConfirmed) {
       const next = cloneConfig(regionConfig);
@@ -1504,7 +1589,7 @@ export function RegionManagementPage({
       setCurrentConfig({ ...deviceConfig!, regionConfig: next });
       setDirty(true);
     } else {
-      setDragState({ kind: "pan", pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, offsetX: viewportOffset.x, offsetY: viewportOffset.y });
+      applyDragState({ kind: "pan", pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, offsetX: viewportOffset.x, offsetY: viewportOffset.y });
     }
     event.currentTarget.setPointerCapture(event.pointerId);
   };
@@ -1529,37 +1614,56 @@ export function RegionManagementPage({
       });
       return;
     }
-    if (!dragState || dragState.pointerId !== event.pointerId) return;
+    if (!dragStateRef.current || dragStateRef.current.pointerId !== event.pointerId) return;
+    let activeDrag = dragStateRef.current;
     const world = toWorld(event);
-    if (dragState.kind === "pan") {
+    if (activeDrag.kind === "background-pending") {
+      const distance = Math.hypot(
+        event.clientX - activeDrag.startClientX,
+        event.clientY - activeDrag.startClientY,
+      );
+      if (distance < BG_CLICK_MOVE_THRESHOLD_PX) return;
+      activeDrag = promoteBackgroundPending(activeDrag);
+      const current = configRef.current;
+      if (!current) return;
+      const next = cloneConfig(current.regionConfig);
+      const instance = next.backgroundInstances.find((entry) => entry.id === activeDrag.instanceId);
+      if (!instance) return;
+      instance.xCm = Math.round(activeDrag.instance.xCm + world.x - activeDrag.startWorldX);
+      instance.yCm = Math.round(activeDrag.instance.yCm + world.y - activeDrag.startWorldY);
+      setCurrentConfig({ ...current, regionConfig: next });
+      setDirty(true);
+      return;
+    }
+    if (activeDrag.kind === "pan") {
       setViewportOffset({
-        x: dragState.offsetX + event.clientX - dragState.startX,
-        y: dragState.offsetY + event.clientY - dragState.startY,
+        x: activeDrag.offsetX + event.clientX - activeDrag.startX,
+        y: activeDrag.offsetY + event.clientY - activeDrag.startY,
       });
       return;
     }
-    if (dragState.kind === "region") {
-      updateRegionGeometry(dragState.regionId, updateGeometryCenter(
-        dragState.geometry,
-        centerOf(dragState.geometry).x + world.x - dragState.startWorldX,
-        centerOf(dragState.geometry).y + world.y - dragState.startWorldY,
+    if (activeDrag.kind === "region") {
+      updateRegionGeometry(activeDrag.regionId, updateGeometryCenter(
+        activeDrag.geometry,
+        centerOf(activeDrag.geometry).x + world.x - activeDrag.startWorldX,
+        centerOf(activeDrag.geometry).y + world.y - activeDrag.startWorldY,
       ));
       return;
     }
-    if (dragState.kind === "region-resize") {
-      if (dragState.geometry.shape === "circle") {
-        const radiusCm = Math.max(10, Math.round(Math.hypot(world.x - dragState.geometry.centerXCm, world.y - dragState.geometry.centerYCm)));
-        updateRegionGeometry(dragState.regionId, { ...dragState.geometry, radiusCm });
+    if (activeDrag.kind === "region-resize") {
+      if (activeDrag.geometry.shape === "circle") {
+        const radiusCm = Math.max(10, Math.round(Math.hypot(world.x - activeDrag.geometry.centerXCm, world.y - activeDrag.geometry.centerYCm)));
+        updateRegionGeometry(activeDrag.regionId, { ...activeDrag.geometry, radiusCm });
       } else {
-        const left = dragState.geometry.centerXCm - dragState.geometry.widthCm / 2;
-        const right = dragState.geometry.centerXCm + dragState.geometry.widthCm / 2;
-        const bottom = dragState.geometry.centerYCm - dragState.geometry.heightCm / 2;
-        const top = dragState.geometry.centerYCm + dragState.geometry.heightCm / 2;
-        const nextLeft = dragState.handle.includes("w") ? Math.min(world.x, right - 10) : left;
-        const nextRight = dragState.handle.includes("e") ? Math.max(world.x, left + 10) : right;
-        const nextBottom = dragState.handle.includes("s") ? Math.min(world.y, top - 10) : bottom;
-        const nextTop = dragState.handle.includes("n") ? Math.max(world.y, bottom + 10) : top;
-        updateRegionGeometry(dragState.regionId, {
+        const left = activeDrag.geometry.centerXCm - activeDrag.geometry.widthCm / 2;
+        const right = activeDrag.geometry.centerXCm + activeDrag.geometry.widthCm / 2;
+        const bottom = activeDrag.geometry.centerYCm - activeDrag.geometry.heightCm / 2;
+        const top = activeDrag.geometry.centerYCm + activeDrag.geometry.heightCm / 2;
+        const nextLeft = activeDrag.handle.includes("w") ? Math.min(world.x, right - 10) : left;
+        const nextRight = activeDrag.handle.includes("e") ? Math.max(world.x, left + 10) : right;
+        const nextBottom = activeDrag.handle.includes("s") ? Math.min(world.y, top - 10) : bottom;
+        const nextTop = activeDrag.handle.includes("n") ? Math.max(world.y, bottom + 10) : top;
+        updateRegionGeometry(activeDrag.regionId, {
           shape: "rect",
           centerXCm: Math.round((nextLeft + nextRight) / 2),
           centerYCm: Math.round((nextBottom + nextTop) / 2),
@@ -1569,15 +1673,15 @@ export function RegionManagementPage({
       }
       return;
     }
-    if (dragState.kind === "detection-resize") {
+    if (activeDrag.kind === "detection-resize") {
       const current = configRef.current;
       if (!current) return;
       const next = cloneConfig(current.regionConfig);
-      const rect = { ...dragState.rect };
-      if (dragState.handle.includes("w")) rect.xMin = Math.min(Math.round(world.x), rect.xMax - 10);
-      if (dragState.handle.includes("e")) rect.xMax = Math.max(Math.round(world.x), rect.xMin + 10);
-      if (dragState.handle.includes("s")) rect.yMin = Math.min(Math.round(world.y), rect.yMax - 10);
-      if (dragState.handle.includes("n")) rect.yMax = Math.max(Math.round(world.y), rect.yMin + 10);
+      const rect = { ...activeDrag.rect };
+      if (activeDrag.handle.includes("w")) rect.xMin = Math.min(Math.round(world.x), rect.xMax - 10);
+      if (activeDrag.handle.includes("e")) rect.xMax = Math.max(Math.round(world.x), rect.xMin + 10);
+      if (activeDrag.handle.includes("s")) rect.yMin = Math.min(Math.round(world.y), rect.yMax - 10);
+      if (activeDrag.handle.includes("n")) rect.yMax = Math.max(Math.round(world.y), rect.yMin + 10);
       next.detection.rectCm = rect;
       next.rangeBox = { xMin: rect.xMin / 100, xMax: rect.xMax / 100, yMin: rect.yMin / 100, yMax: rect.yMax / 100 };
       setCurrentConfig({ ...current, regionConfig: next });
@@ -1585,33 +1689,33 @@ export function RegionManagementPage({
       return;
     }
     if (
-      dragState.kind !== "background"
-      && dragState.kind !== "background-resize"
-      && dragState.kind !== "background-rotate"
+      activeDrag.kind !== "background"
+      && activeDrag.kind !== "background-resize"
+      && activeDrag.kind !== "background-rotate"
     ) {
       return;
     }
     const current = configRef.current;
     if (!current) return;
     const next = cloneConfig(current.regionConfig);
-    const instance = next.backgroundInstances.find((entry) => entry.id === dragState.instanceId);
+    const instance = next.backgroundInstances.find((entry) => entry.id === activeDrag.instanceId);
     if (!instance) return;
-    if (dragState.kind === "background") {
-      instance.xCm = Math.round(dragState.instance.xCm + world.x - dragState.startWorldX);
-      instance.yCm = Math.round(dragState.instance.yCm + world.y - dragState.startWorldY);
-    } else if (dragState.kind === "background-rotate") {
-      const centerXCm = dragState.instance.xCm + dragState.instance.widthCm / 2;
-      const centerYCm = dragState.instance.yCm + dragState.instance.heightCm / 2;
+    if (activeDrag.kind === "background") {
+      instance.xCm = Math.round(activeDrag.instance.xCm + world.x - activeDrag.startWorldX);
+      instance.yCm = Math.round(activeDrag.instance.yCm + world.y - activeDrag.startWorldY);
+    } else if (activeDrag.kind === "background-rotate") {
+      const centerXCm = activeDrag.instance.xCm + activeDrag.instance.widthCm / 2;
+      const centerYCm = activeDrag.instance.yCm + activeDrag.instance.heightCm / 2;
       const angleDeg = angleDegFromCenter(centerXCm, centerYCm, world.x, world.y);
       instance.rotationDeg = normalizeRotationDeg(
-        dragState.startRotationDeg + (angleDeg - dragState.startAngleDeg),
+        activeDrag.startRotationDeg + (angleDeg - activeDrag.startAngleDeg),
       );
     } else {
       const resized = resizeBackgroundByCorner(
-        dragState.instance,
-        dragState.handle,
-        dragState.centerXCm,
-        dragState.centerYCm,
+        activeDrag.instance,
+        activeDrag.handle,
+        activeDrag.centerXCm,
+        activeDrag.centerYCm,
         world.x,
         world.y,
       );
@@ -1646,26 +1750,38 @@ export function RegionManagementPage({
       window.cancelAnimationFrame(pointerMoveFrameRef.current);
       pointerMoveFrameRef.current = null;
     }
-    const pending = pendingPointerMoveRef.current;
+    const pendingMove = pendingPointerMoveRef.current;
     pendingPointerMoveRef.current = null;
-    if (pending) processPointerMove(pending);
+    if (pendingMove) processPointerMove(pendingMove);
     touchPointsRef.current.delete(event.pointerId);
     if (touchPointsRef.current.size < 2) pinchRef.current = null;
-    if (dragState && dragState.kind !== "pan" && configRef.current && !readOnly) {
+
+    const activeDrag = dragStateRef.current;
+    clearBackgroundPressTimer();
+    if (activeDrag?.kind === "background-pending" && activeDrag.pointerId === event.pointerId) {
+      setSelectedBackgroundId(activeDrag.cycleInstanceId);
+      applyDragState(null);
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      return;
+    }
+
+    if (activeDrag && activeDrag.kind !== "pan" && configRef.current && !readOnly) {
       const editingRegionDrag =
-        (dragState.kind === "region" || dragState.kind === "region-resize")
-        && regionEditBaselineRef.current?.id === dragState.regionId;
+        (activeDrag.kind === "region" || activeDrag.kind === "region-resize")
+        && regionEditBaselineRef.current?.id === activeDrag.regionId;
       const editingDetectionDrag =
-        dragState.kind === "detection-resize" && Boolean(detectionBaselineRef.current);
+        activeDrag.kind === "detection-resize" && Boolean(detectionBaselineRef.current);
       // Region/detection edits stay local until explicit Save/Apply.
       if (!editingRegionDrag && !editingDetectionDrag) {
-        const apply = dragState.kind === "region" || dragState.kind === "region-resize"
+        const apply = activeDrag.kind === "region" || activeDrag.kind === "region-resize"
           ? { tagConfig: true }
           : undefined;
         void persistRegionConfig(configRef.current.regionConfig, apply);
       }
     }
-    setDragState(null);
+    applyDragState(null);
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
   };
 
@@ -1899,6 +2015,7 @@ export function RegionManagementPage({
               <button type="button" onClick={() => handleMenuAction("export-detection")}>导出探测范围配置</button>
               <button type="button" disabled={readOnly} onClick={() => handleMenuAction("import-regions")}>导入标签区域配置</button>
               <button type="button" onClick={() => handleMenuAction("export-regions")}>导出标签区域配置</button>
+              <button type="button" disabled={readOnly || saving} onClick={() => handleMenuAction("clear-people-count")}>清除人数</button>
             </div> : null}
             <input ref={fileInputRef} className="region-bg-file-input" type="file" accept="image/png,image/jpeg,image/webp,image/*" multiple onChange={(event) => {
               const files = Array.from(event.target.files ?? []);
@@ -2352,7 +2469,7 @@ export function RegionManagementPage({
               )}
             </section>
             <div className="region-bg-footer">
-              <p className="region-param-message">{selectedBackground ? "画布底图已选中：拖动/四角绕中心等比缩放/顶部旋转，Delete 删除；重叠处再次点击可切换选中" : backgroundMessage}</p>
+              <p className="region-param-message">{selectedBackground ? "画布底图已选中：短按切换重叠层，拖动或长按移动；四角绕中心等比缩放/顶部旋转，Delete 删除" : backgroundMessage}</p>
               <button
                 type="button"
                 className="primary-button"

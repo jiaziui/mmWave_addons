@@ -76,6 +76,26 @@ button {
   margin-bottom: 0.2rem;
 }
 
+.sidebar-logo-button {
+  display: block;
+  width: 100%;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  border-radius: 8px;
+}
+
+.sidebar-logo-button:hover {
+  opacity: 0.92;
+}
+
+.sidebar-logo-button:focus-visible {
+  outline: 2px solid rgba(80, 153, 255, 0.7);
+  outline-offset: 2px;
+}
+
 .brand-logo-image {
   width: 100%;
   height: auto;

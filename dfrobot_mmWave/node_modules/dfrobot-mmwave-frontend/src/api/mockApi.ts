@@ -794,6 +794,23 @@ export const mockFactoryResetDevice = async (
   return { ok: true, config: structuredClone(configFor(device)) };
 };
 
+export const mockClearPeopleCount = async (
+  deviceId: string,
+): Promise<{ ok: boolean; detail: MmwaveDeviceDetail }> => {
+  const device = devices.find((entry) => entry.id === deviceId);
+  if (!device) throw new Error("Mock device not found");
+  if (device.lastZoneSnapshot?.counts) {
+    device.lastZoneSnapshot = {
+      ...device.lastZoneSnapshot,
+      counts: {
+        ...device.lastZoneSnapshot.counts,
+        peopleCount: 0,
+      },
+    };
+  }
+  return mockFetchDetail(deviceId);
+};
+
 export const mockInitializeDevice = async (
   deviceId: string,
   payload: {

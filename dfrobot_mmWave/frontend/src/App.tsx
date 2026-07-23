@@ -571,7 +571,15 @@ function App() {
     <aside className="sidebar" aria-hidden={sidebarCollapsed}>
       <div className="sidebar-header">
         <div className="sidebar-logo">
-          <img src="./ui_logo.svg" alt="DFRobot mmWave" className="brand-logo-image" />
+          <button
+            type="button"
+            className="sidebar-logo-button"
+            aria-label="返回首页"
+            title="返回首页"
+            onClick={() => setEntered(false)}
+          >
+            <img src="./ui_logo.svg" alt="DFRobot mmWave" className="brand-logo-image" />
+          </button>
         </div>
       </div>
       <nav className="sidebar-nav">

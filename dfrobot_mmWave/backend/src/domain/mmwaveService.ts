@@ -619,6 +619,24 @@ export class MmwaveService {
     return this.getDeviceDetail(deviceId);
   }
 
+  async clearPeopleCount(deviceId: string): Promise<MmwaveDeviceDetail> {
+    const device = this.storage.getDevice(deviceId);
+    if (!device) {
+      throw new Error("Device not found");
+    }
+    if (!this.haClient) {
+      throw new Error("Home Assistant is not linked");
+    }
+
+    const profile = getMmwaveProfile(device.profileId);
+    if (!profile?.clearPeopleCount) {
+      throw new Error("当前设备不支持清除人数");
+    }
+
+    await profile.clearPeopleCount(this.haClient, device);
+    return this.getDeviceDetail(deviceId);
+  }
+
   async factoryResetDevice(deviceId: string): Promise<MmwaveDeviceConfig> {
     let device = this.storage.getDevice(deviceId);
     if (!device) {
