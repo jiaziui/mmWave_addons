@@ -1738,15 +1738,26 @@ button {
 }
 
 .workspace-rotate-handle {
-  fill: #fff;
-  stroke: #3a7fde;
-  stroke-width: 3;
   cursor: grab;
-  vector-effect: non-scaling-stroke;
 }
 
 .workspace-rotate-handle:active {
   cursor: grabbing;
+}
+
+.workspace-rotate-handle-hit {
+  fill: #fff;
+  stroke: #3a7fde;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.workspace-rotate-handle-icon {
+  fill: none;
+  stroke: #3a7fde;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .region-status-bar,
@@ -2463,6 +2474,29 @@ button {
   align-items: center;
   padding: 0.15rem 0.2rem 0.55rem;
   margin-bottom: 0;
+}
+
+.region-page-header .page-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.region-back-overview-btn {
+  padding: 0.45rem 0.95rem;
+  border-radius: 999px;
+  font-size: 0.86rem;
+  font-weight: 700;
+  color: #2f4f86;
+  background: rgba(47, 103, 233, 0.08);
+  border: 1px solid rgba(118, 144, 194, 0.22);
+  white-space: nowrap;
+}
+
+.region-back-overview-btn:hover {
+  background: rgba(47, 103, 233, 0.14);
 }
 
 .region-page-title-row {

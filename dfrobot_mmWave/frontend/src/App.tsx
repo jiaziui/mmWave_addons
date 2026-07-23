@@ -875,6 +875,7 @@ function App() {
             onSelectDevice={setSelectedDeviceId}
             onMessage={setMessage}
             onError={setError}
+            onBackToOverview={() => setView("overview")}
             sidebarToggle={renderSidebarToggle()}
           />
         ) : null}

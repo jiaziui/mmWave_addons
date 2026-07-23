@@ -101,6 +101,46 @@ const worldDeltaToBackgroundLocal = (rotationDeg: number, dx: number, dy: number
   };
 };
 
+/** Whether a world point lies inside a (possibly rotated) background rect. */
+const pointHitsBackground = (instance: BaseMapInstance, worldX: number, worldY: number) => {
+  const centerXCm = instance.xCm + instance.widthCm / 2;
+  const centerYCm = instance.yCm + instance.heightCm / 2;
+  const local = worldDeltaToBackgroundLocal(
+    instance.rotationDeg ?? 0,
+    worldX - centerXCm,
+    worldY - centerYCm,
+  );
+  const halfW = instance.widthCm / 2;
+  const halfH = instance.heightCm / 2;
+  return Math.abs(local.x) <= halfW && Math.abs(local.y) <= halfH;
+};
+
+/**
+ * Pick a background under the pointer. Hits are ordered top→bottom by zIndex.
+ * If the current selection is already in the stack, advance to the next (cycle)
+ * so overlapping images remain selectable. Only start drag when the pick stays
+ * on the same instance (typically a single exclusive hit).
+ */
+const pickBackgroundAtPoint = (
+  instances: BaseMapInstance[],
+  worldX: number,
+  worldY: number,
+  currentSelectedId: string | null,
+): { instance: BaseMapInstance; startDrag: boolean } | null => {
+  const hits = instances
+    .filter((entry) => entry.visible && pointHitsBackground(entry, worldX, worldY))
+    .sort((left, right) => right.zIndex - left.zIndex);
+  if (!hits.length) return null;
+  const currentIndex = currentSelectedId
+    ? hits.findIndex((entry) => entry.id === currentSelectedId)
+    : -1;
+  const next = currentIndex < 0 ? hits[0] : hits[(currentIndex + 1) % hits.length];
+  return {
+    instance: next,
+    startDrag: Boolean(currentSelectedId && next.id === currentSelectedId),
+  };
+};
+
 /** Scale from image center; keep aspect ratio; support rotated images. */
 const resizeBackgroundByCorner = (
   instance: BaseMapInstance,
@@ -246,6 +286,7 @@ export function RegionManagementPage({
   onSelectDevice,
   onMessage,
   onError,
+  onBackToOverview,
   sidebarToggle,
 }: {
   devices: StoredMmwaveDevice[];
@@ -253,6 +294,7 @@ export function RegionManagementPage({
   onSelectDevice: (deviceId: string) => void;
   onMessage: (message: string) => void;
   onError: (message: string) => void;
+  onBackToOverview?: () => void;
   sidebarToggle?: ReactNode;
 }) {
   const boundDevices = devices.filter((device) => device.initialized && device.deviceNo);
@@ -1199,7 +1241,7 @@ export function RegionManagementPage({
     if (saved) {
       setSelectedBackgroundId(instanceId);
       setBackgroundVisible(true);
-      setBackgroundMessage("已添加（统一宽约 2m）。拖动/四角缩放/旋转手柄调整，Delete 删除");
+      setBackgroundMessage("已添加（统一宽约 2m）。拖动/四角缩放/旋转手柄调整，Delete 删除；重叠处点击可切换选中");
       onMessage("底图已添加到当前设备画布");
     }
   };
@@ -1359,7 +1401,6 @@ export function RegionManagementPage({
     const regionTarget = target.closest<SVGElement>("[data-region-id]");
     const backgroundRotate = target.closest<SVGElement>("[data-bg-rotate]");
     const backgroundResize = target.closest<SVGElement>("[data-bg-resize]");
-    const backgroundTarget = target.closest<SVGElement>("[data-bg-id]");
     if (!readOnly && activePanel === "detection" && detectionResize && regionConfig.detection.mode === "rect") {
       setDragState({
         kind: "detection-resize",
@@ -1434,11 +1475,28 @@ export function RegionManagementPage({
           centerYCm: instance.yCm + instance.heightCm / 2,
         });
       }
-    } else if (!readOnly && activePanel === "background" && backgroundTarget) {
-      const instance = regionConfig.backgroundInstances.find((entry) => entry.id === backgroundTarget.dataset.bgId);
-      if (instance) {
-        setSelectedBackgroundId(instance.id);
-        setDragState({ kind: "background", pointerId: event.pointerId, instanceId: instance.id, startWorldX: world.x, startWorldY: world.y, instance: structuredClone(instance) });
+    } else if (!readOnly && activePanel === "background") {
+      // 几何命中 + 重叠循环选中（不依赖 SVG 最上层 DOM）
+      const picked = pickBackgroundAtPoint(
+        regionConfig.backgroundInstances,
+        world.x,
+        world.y,
+        selectedBackgroundId,
+      );
+      if (picked) {
+        setSelectedBackgroundId(picked.instance.id);
+        if (picked.startDrag) {
+          setDragState({
+            kind: "background",
+            pointerId: event.pointerId,
+            instanceId: picked.instance.id,
+            startWorldX: world.x,
+            startWorldY: world.y,
+            instance: structuredClone(picked.instance),
+          });
+        }
+      } else {
+        setDragState({ kind: "pan", pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, offsetX: viewportOffset.x, offsetY: viewportOffset.y });
       }
     } else if (!readOnly && activePanel === "detection" && regionConfig.detection.mode === "custom" && !regionConfig.detection.customConfirmed) {
       const next = cloneConfig(regionConfig);
@@ -1714,6 +1772,13 @@ export function RegionManagementPage({
             {sidebarToggle}
             <h2>区域管理</h2>
           </div>
+          {onBackToOverview ? (
+            <div className="page-actions">
+              <button type="button" className="ghost-button region-back-overview-btn" onClick={onBackToOverview}>
+                返回总览
+              </button>
+            </div>
+          ) : null}
         </header>
         <div className="empty-state"><strong>暂无已绑定设备</strong><span>请先在设备管理中完成扫描和初始化。</span></div>
       </section>
@@ -1730,6 +1795,13 @@ export function RegionManagementPage({
               <span className="region-device-name">{selectedDevice.name}</span>
             </div>
           </div>
+          {onBackToOverview ? (
+            <div className="page-actions">
+              <button type="button" className="ghost-button region-back-overview-btn" onClick={onBackToOverview}>
+                返回总览
+              </button>
+            </div>
+          ) : null}
         </header>
         <div className="empty-state"><strong>正在加载区域配置</strong><span>{selectedDevice.name}</span></div>
       </section>
@@ -1807,6 +1879,18 @@ export function RegionManagementPage({
         </div>
         <div className="page-actions">
           {saving ? <span className="save-state">保存中...</span> : dirty ? <span className="save-state pending">存在未保存修改</span> : null}
+          {onBackToOverview ? (
+            <button
+              type="button"
+              className="ghost-button region-back-overview-btn"
+              onClick={() => {
+                if (dirty && !window.confirm("当前修改尚未保存，确认返回总览？")) return;
+                onBackToOverview();
+              }}
+            >
+              返回总览
+            </button>
+          ) : null}
           <div className="region-menu-wrap" ref={menuWrapRef}>
             <button type="button" className="region-menu-btn" aria-label="更多操作" onClick={() => setMenuOpen((value) => !value)}>⋯</button>
             {menuOpen ? <div className="region-dropdown">
@@ -1858,7 +1942,13 @@ export function RegionManagementPage({
             setViewportOffset({ x: mouseX - worldX * nextScale, y: mouseY + worldY * nextScale });
           }}
         >
-          {backgroundVisible ? [...regionConfig.backgroundInstances].sort((a, b) => a.zIndex - b.zIndex).map((instance) => {
+          {backgroundVisible ? (() => {
+            const sorted = [...regionConfig.backgroundInstances].sort((a, b) => a.zIndex - b.zIndex);
+            const selectedId = activePanel === "background" ? selectedBackgroundId : null;
+            const drawOrder = selectedId
+              ? [...sorted.filter((entry) => entry.id !== selectedId), ...sorted.filter((entry) => entry.id === selectedId)]
+              : sorted;
+            return drawOrder.map((instance) => {
             if (!instance.visible) return null;
             const selected = selectedBackgroundId === instance.id && activePanel === "background";
             const imgX = tx(instance.xCm);
@@ -1868,7 +1958,7 @@ export function RegionManagementPage({
             const centerX = imgX + imgW / 2;
             const centerY = imgY + imgH / 2;
             const rotationDeg = instance.rotationDeg ?? 0;
-            const rotateHandleY = imgY - 28;
+            const rotateHandleY = imgY - 34;
             return (
               <g key={instance.id} transform={`rotate(${rotationDeg} ${centerX} ${centerY})`}>
                 <image
@@ -1897,13 +1987,21 @@ export function RegionManagementPage({
                       x2={centerX}
                       y2={rotateHandleY}
                     />
-                    <circle
+                    <g
                       data-bg-rotate={instance.id}
-                      cx={centerX}
-                      cy={rotateHandleY}
-                      r="7"
                       className="workspace-rotate-handle"
-                    />
+                      transform={`translate(${centerX}, ${rotateHandleY})`}
+                    >
+                      <circle r="12" className="workspace-rotate-handle-hit" />
+                      <g
+                        className="workspace-rotate-handle-icon"
+                        transform="translate(-7, -7) scale(0.583)"
+                        pointerEvents="none"
+                      >
+                        <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
+                        <path d="M21 3v5h-5" />
+                      </g>
+                    </g>
                     {([
                       ["nw", imgX, imgY],
                       ["ne", imgX + imgW, imgY],
@@ -1924,7 +2022,8 @@ export function RegionManagementPage({
                 ) : null}
               </g>
             );
-          }) : null}
+          });
+          })() : null}
           <g className="region-axis-layer">
             {gridVisible ? <>
               <line className="region-axis-line" x1="0" x2={canvasSize.width} y1={viewportOffset.y} y2={viewportOffset.y} />
@@ -2253,7 +2352,7 @@ export function RegionManagementPage({
               )}
             </section>
             <div className="region-bg-footer">
-              <p className="region-param-message">{selectedBackground ? "画布底图已选中：拖动/四角绕中心等比缩放/顶部旋转，Delete 删除" : backgroundMessage}</p>
+              <p className="region-param-message">{selectedBackground ? "画布底图已选中：拖动/四角绕中心等比缩放/顶部旋转，Delete 删除；重叠处再次点击可切换选中" : backgroundMessage}</p>
               <button
                 type="button"
                 className="primary-button"

@@ -14,8 +14,8 @@ const BASE_X_MIN = -5;
 const BASE_X_MAX = 5;
 const BASE_X_SPAN = BASE_X_MAX - BASE_X_MIN;
 /** Positive Y : negative Y display share around origin. */
-const Y_POS_RATIO = 8;
-const Y_NEG_RATIO = 2;
+const Y_POS_RATIO = 9;
+const Y_NEG_RATIO = 1;
 const Y_RATIO_SUM = Y_POS_RATIO + Y_NEG_RATIO;
 /** Fallback aspect (h/w) before first measure. */
 const DEFAULT_ASPECT = 8.45 / 10;
@@ -100,7 +100,7 @@ const buildIntegerTicks = (min: number, max: number) => {
   return Array.from({ length: end - start + 1 }, (_, index) => start + index);
 };
 
-/** Zoom around origin (0,0); keep X symmetric and Y split 8:2. */
+/** Zoom around origin (0,0); keep X symmetric and Y split 9:1. */
 const buildWorld = (aspect: number, zoom: number) => {
   const safeAspect = Number.isFinite(aspect) && aspect > 0.2 ? aspect : DEFAULT_ASPECT;
   const safeZoom = clampZoom(zoom);
