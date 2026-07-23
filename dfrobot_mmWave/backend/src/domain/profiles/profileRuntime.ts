@@ -70,6 +70,7 @@ const entityDefinitions: C4004EntityDefinition[] = [
   { key: "zone4McuIo", domain: "number", slug: "zone_4_mcu_io", aliases: ["zone_mcu_io4", "zone_mcu_io_4"], access: "readwrite" },
   { key: "zone5McuIo", domain: "number", slug: "zone_5_mcu_io", aliases: ["zone_mcu_io5", "zone_mcu_io_5"], access: "readwrite" },
   { key: "zone6McuIo", domain: "number", slug: "zone_6_mcu_io", aliases: ["zone_mcu_io6", "zone_mcu_io_6"], access: "readwrite" },
+  { key: "setInstallInfo", domain: "button", slug: "set_install_info", access: "action" },
   { key: "setFourSidedRangeMode", domain: "button", slug: "set_four_sided_range_mode", access: "action" },
   { key: "reset", domain: "button", slug: "reset", access: "action" },
   { key: "factoryReset", domain: "button", slug: "factory_reset", access: "action" },

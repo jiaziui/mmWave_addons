@@ -1,5 +1,22 @@
 # 更新日志
 
+## Unreleased
+
+### Changed
+
+- 设备型号配置从 `backend/src/domain/profiles/deviceProfileCatalog.json` 迁移为插件目录 `config/device/<profileId>.json`（例如 `c4004.json`），启动时扫描加载。
+- 详情页「重启设备」继续使用软复位 `actions/reset`；区域管理新增「恢复出厂设置」`actions/factory-reset`。
+- 出厂复位后等待 0.5s：从设备拉取探测范围与参数、清空本地标签区域、保留底图，并同步 runtime cache。
+- 欢迎页仅首次进入；之后刷新直接进入控制台。
+- 侧边栏可收缩；页面标题栏与区域管理头部布局调整；顶部居中 Toast（约 2s 消失）。
+- 后端 API / 新增型号接入文档已同步更新（`backend/README_API.md`、`backend/README_ADD_DEVICE_PROFILE.md`）。
+
+### Added
+
+- `POST /api/mmwave/devices/:deviceId/actions/factory-reset`
+- `DELETE /api/mmwave/base-maps/user/:assetId`（用户底图删除）
+- `supportsFactoryReset` 能力声明与 C4004 `factoryResetDevice` 适配
+
 ## 1.0.0
 
 ### Initial Release

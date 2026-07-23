@@ -31,7 +31,12 @@ type InitializeWizardState = {
   name: string;
   deploymentName: string;
   deviceNoMode: DeviceNoMode;
+  /** 仅自动模式使用，与自定义互不影响 */
+  autoDeviceNo: string;
+  /** 仅自定义模式使用，与自动互不影响 */
   customDeviceNo: string;
+  /** 绑定成功后的实际设备号，仅用于完成页展示 */
+  boundDeviceNo: string;
   installHeightM: number;
   detectionMode: DetectionMode;
   step: 1 | 2 | 3;
@@ -363,20 +368,34 @@ function App() {
     return String(maxSequence + 1);
   };
 
-  const getWizardDeviceNo = (wizard: InitializeWizardState): string =>
-    wizard.deviceNoMode === "auto" ? getSuggestedDeviceNo() : normalizeDeviceNoInput(wizard.customDeviceNo);
+  const getWizardDeviceNo = (wizard: InitializeWizardState): string => {
+    if (wizard.completed && wizard.boundDeviceNo) {
+      return wizard.boundDeviceNo;
+    }
+    // 严格按当前模式取值，自动/自定义互不串用
+    if (wizard.deviceNoMode === "auto") {
+      return wizard.autoDeviceNo || getSuggestedDeviceNo();
+    }
+    return normalizeDeviceNoInput(wizard.customDeviceNo);
+  };
 
   const isDuplicateDeviceNo = (deviceNo: string, currentDeviceId: string): boolean =>
     devices.some((device) => device.id !== currentDeviceId && device.deviceNo === deviceNo);
 
   const handleInitializeDevice = (device: StoredMmwaveDevice) => {
     setError("");
+    if (device.discovery.status !== "online") {
+      setError("设备离线，无法进行初始化绑定");
+      return;
+    }
     setInitializeWizard({
       deviceId: device.id,
       name: device.name,
       deploymentName: device.deploymentName ?? "",
       deviceNoMode: "auto",
+      autoDeviceNo: getSuggestedDeviceNo(),
       customDeviceNo: "",
+      boundDeviceNo: "",
       installHeightM: device.installInfo?.installHeightM ?? 1.8,
       detectionMode: device.detectionMode ?? 1,
       step: 1,
@@ -443,7 +462,10 @@ function App() {
     }
     setError("");
     updateInitializeWizard({
-      customDeviceNo: initializeWizard.deviceNoMode === "custom" ? deviceNo : initializeWizard.customDeviceNo,
+      autoDeviceNo:
+        initializeWizard.deviceNoMode === "auto" ? deviceNo : initializeWizard.autoDeviceNo,
+      customDeviceNo:
+        initializeWizard.deviceNoMode === "custom" ? deviceNo : initializeWizard.customDeviceNo,
       step: 2,
     });
   };
@@ -453,18 +475,37 @@ function App() {
       return;
     }
 
+    const currentDevice = devices.find((device) => device.id === initializeWizard.deviceId);
+    if (!currentDevice || currentDevice.discovery.status !== "online") {
+      setError("设备离线，无法完成初始化绑定");
+      updateInitializeWizard({ submitting: false });
+      return;
+    }
+
     try {
       updateInitializeWizard({ submitting: true });
       setError("");
+      const deviceNoMode = initializeWizard.deviceNoMode;
+      const deviceNo = getWizardDeviceNo(initializeWizard);
+      if (!deviceNo) {
+        throw new Error(deviceNoMode === "custom" ? "请输入自定义设备号" : "自动设备号无效");
+      }
+      if (isDuplicateDeviceNo(deviceNo, initializeWizard.deviceId)) {
+        throw new Error("设备号已存在，请更换后再继续");
+      }
+      // 自定义：只提交自定义号；自动：提交自动快照号（后端 auto 路径必须使用该号）
       const response = await submitInitializeDevice(initializeWizard.deviceId, {
-        deviceNoMode: initializeWizard.deviceNoMode,
-        customDeviceNo:
-          initializeWizard.deviceNoMode === "custom"
-            ? normalizeDeviceNoInput(initializeWizard.customDeviceNo)
-            : undefined,
+        deviceNoMode,
+        customDeviceNo: deviceNo,
         installHeightM: initializeWizard.installHeightM,
         detectionMode: initializeWizard.detectionMode,
       });
+      const boundDeviceNo = response.device.deviceNo ?? "";
+      if (!boundDeviceNo || boundDeviceNo !== deviceNo) {
+        throw new Error(
+          `设备号绑定结果不一致：当前为${deviceNoMode === "custom" ? "自定义" : "自动"} ${deviceNo}，实际 ${boundDeviceNo || "空"}`,
+        );
+      }
       const refreshed = await fetchDevices();
       setDevices(refreshed.devices);
       setInitializeWizard((current) =>
@@ -476,7 +517,7 @@ function App() {
               completed: true,
               name: response.device.name,
               deploymentName: response.device.deploymentName ?? current.deploymentName,
-              customDeviceNo: response.device.deviceNo ?? current.customDeviceNo,
+              boundDeviceNo,
             }
           : current,
       );
@@ -631,11 +672,12 @@ function App() {
   );
 
   const renderDetail = () => (
-    <section className="page">
+    <section className="page detail-page">
       {detail ? (
         <div className="detail-layout">
           <section className="panel detail-radar-panel">
             <RadarCanvas
+              deviceId={detail.id}
               coordinate={detail.coordinate}
               rangeBox={detail.rangeBox}
               detection={detail.detection}
@@ -648,7 +690,7 @@ function App() {
             {!detail.trajectoryAvailable ? <div className="degraded-banner">未接收到 MQTT 轨迹点，当前只显示范围框与区域标签。</div> : null}
           </section>
           <div className="detail-side">
-            <section className="panel compact-panel">
+            <section className="panel compact-panel detail-stat-panel">
               <div className="two-stat-row">
                 <article>
                   <span>运动人数</span>
@@ -661,7 +703,7 @@ function App() {
               </div>
             </section>
 
-            <section className="panel compact-panel">
+            <section className="panel compact-panel detail-io-panel">
               <div className="section-title">IO 联动状态</div>
               <div className="io-grid">
                 {detail.ioStates.map((io) => (
@@ -673,23 +715,25 @@ function App() {
               </div>
             </section>
 
-            <section className="panel compact-panel">
+            <section className="panel compact-panel detail-info-panel">
               <div className="detail-panel-tabs" role="tablist" aria-label="设备信息">
                 <button type="button" role="tab" aria-selected={detailPanelTab === "basics"} className={detailPanelTab === "basics" ? "active" : ""} onClick={() => setDetailPanelTab("basics")}>核心参数</button>
                 <button type="button" role="tab" aria-selected={detailPanelTab === "logs"} className={detailPanelTab === "logs" ? "active" : ""} onClick={() => setDetailPanelTab("logs")}>设备日志</button>
               </div>
-              {detailPanelTab === "basics" ? <div className="basic-list">
-                {detail.basics.map((item) => <div key={item.key} className="basic-item">
-                  <span>{item.label}</span>
-                  <strong>{item.value}</strong>
-                </div>)}
-              </div> : <DeviceLogPanel
-                deviceId={detail.id}
-                online={detail.online}
-                refreshToken={deviceLogRefreshToken}
-                memoryEntries={memoryLogEntries}
-                onError={setError}
-              />}
+              <div className="detail-info-body">
+                {detailPanelTab === "basics" ? <div className="basic-list">
+                  {detail.basics.map((item) => <div key={item.key} className="basic-item">
+                    <span>{item.label}</span>
+                    <strong>{item.value}</strong>
+                  </div>)}
+                </div> : <DeviceLogPanel
+                  deviceId={detail.id}
+                  online={detail.online}
+                  refreshToken={deviceLogRefreshToken}
+                  memoryEntries={memoryLogEntries}
+                  onError={setError}
+                />}
+              </div>
             </section>
           </div>
         </div>
@@ -746,7 +790,8 @@ function App() {
                   const status = getDeviceUiStatus(device);
                   const canViewDetail = device.initialized;
                   const canDelete = device.initialized;
-                  const canInitialize = !device.initialized;
+                  const isOnline = status === "ONLINE";
+                  const canInitialize = !device.initialized && isOnline;
 
                   return (
                     <tr key={device.id}>
@@ -759,8 +804,14 @@ function App() {
                       </td>
                       <td>
                         <div className="device-row-actions">
-                          {canInitialize ? (
-                            <button type="button" className="table-action-button primary" onClick={() => handleInitializeDevice(device)}>
+                          {!device.initialized ? (
+                            <button
+                              type="button"
+                              className="table-action-button primary"
+                              onClick={() => handleInitializeDevice(device)}
+                              disabled={!canInitialize || busy}
+                              title={canInitialize ? undefined : "设备离线，无法初始化绑定"}
+                            >
                               初始化
                             </button>
                           ) : null}
@@ -806,7 +857,7 @@ function App() {
         </div>
       ) : null}
       {renderSidebar()}
-      <main className="content-shell">
+      <main className={view === "detail" ? "content-shell is-detail-view" : "content-shell"}>
         {view !== "region-management" ? renderContentTopbar() : null}
         {view === "overview" ? (
           <OverviewPage
@@ -861,33 +912,44 @@ function App() {
                   <button
                     type="button"
                     className={initializeWizard.deviceNoMode === "auto" ? "segment-button segment-button-active" : "segment-button"}
-                    onClick={() => updateInitializeWizard({ deviceNoMode: "auto" })}
+                    onClick={() => updateInitializeWizard({
+                      deviceNoMode: "auto",
+                      // 只刷新自动号，不改动已输入的自定义号
+                      autoDeviceNo: initializeWizard.autoDeviceNo || getSuggestedDeviceNo(),
+                    })}
                   >
                     自动生成
                   </button>
                   <button
                     type="button"
                     className={initializeWizard.deviceNoMode === "custom" ? "segment-button segment-button-active" : "segment-button"}
-                    onClick={() => updateInitializeWizard({ deviceNoMode: "custom" })}
+                    onClick={() => updateInitializeWizard({
+                      deviceNoMode: "custom",
+                      // 不把自动号填进自定义输入框，两套完全分开
+                    })}
                   >
                     自定义
                   </button>
                 </div>
                 {initializeWizard.deviceNoMode === "custom" ? (
                   <label className="modal-field">
-                    <span>设备号</span>
+                    <span>自定义设备号</span>
                     <input
                       type="text"
                       inputMode="numeric"
                       value={initializeWizard.customDeviceNo}
-                      onChange={(event) => updateInitializeWizard({ customDeviceNo: normalizeDeviceNoInput(event.target.value) })}
+                      onChange={(event) => {
+                        updateInitializeWizard({
+                          customDeviceNo: normalizeDeviceNoInput(event.target.value),
+                        });
+                      }}
                       placeholder="例如：1"
                     />
                   </label>
                 ) : (
                   <div className="readonly-field">
-                    <span>设备号</span>
-                    <strong>{getSuggestedDeviceNo()}</strong>
+                    <span>自动分配设备号</span>
+                    <strong>{initializeWizard.autoDeviceNo || getSuggestedDeviceNo()}</strong>
                   </div>
                 )}
               </div>
@@ -942,7 +1004,10 @@ function App() {
                 </div>
                 <div className="wizard-success">
                   <strong>{initializeWizard.completed ? "绑定完成" : "绑定确认"}</strong>
-                  <span>设备号：{getWizardDeviceNo(initializeWizard)}</span>
+                  <span>
+                    {initializeWizard.deviceNoMode === "custom" ? "自定义设备号" : "自动分配设备号"}：
+                    {getWizardDeviceNo(initializeWizard)}
+                  </span>
                   <span>安装高度：{initializeWizard.installHeightM.toFixed(2)} m</span>
                 </div>
               </div>

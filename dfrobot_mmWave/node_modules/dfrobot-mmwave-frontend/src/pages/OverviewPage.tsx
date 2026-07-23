@@ -48,6 +48,7 @@ export function OverviewPage({
                   <small>{device.online ? "ONLINE" : "OFFLINE"}</small>
                 </div>
                 <RadarCanvas
+                  deviceId={device.id}
                   coordinate={device.coordinate}
                   rangeBox={device.rangeBox}
                   detection={device.detection}

@@ -12,27 +12,30 @@ If this document conflicts with the code, the code wins. Read these files first:
 - `src/domain/mqttBridge.ts`
 - `src/routes/devices.ts`
 
-If you are adding a new device model, read:
+Related docs:
 
-- `README_ADD_DEVICE_PROFILE.md`
+- `README_API.md` — frontend-facing REST API contract
+- `README_ADD_DEVICE_PROFILE.md` — how to add a new device model
+- `README_STORAGE.md` — data directories, file schemas, and API↔storage mapping for maintainers
 
 ## 1. Backend Role
 
 The backend is the service layer of the Home Assistant add-on.
-The first implemented device profile is `C4004`.
+The first fully implemented device profile is `C4004`.
 
-The backend currently does four main things:
+The backend currently does five main things:
 
-1. Discover mmWave devices from Home Assistant.
+1. Discover mmWave devices from Home Assistant using per-model JSON profiles.
 2. Read formal business state from Home Assistant native entities.
-3. Subscribe to MQTT trajectory messages and keep them in memory.
-4. Provide REST and WebSocket data for the frontend overview and detail pages.
+3. Subscribe to MQTT trajectory / tag-event / range topics and keep runtime state in memory.
+4. Persist low-frequency device config, regions, and event logs locally.
+5. Provide REST and WebSocket data for the frontend overview, detail, and region pages.
 
 One-line boundary:
 
 - Low-frequency identity and config go to local JSON.
 - Formal runtime state comes from Home Assistant entities.
-- High-frequency trajectory data stays in memory only.
+- High-frequency trajectory / tag events stay in memory only (logs are persisted when state changes).
 
 ## 2. Technology Stack
 
@@ -48,7 +51,7 @@ Communication model:
 
 - REST for initial page data and actions
 - WebSocket for event-triggered live refresh, with polling as fallback
-- MQTT for high-frequency trajectory payloads
+- MQTT for high-frequency trajectory and tag-event payloads
 
 ## 3. Folder Responsibilities
 
@@ -65,27 +68,27 @@ Communication model:
 - `src/config/storage.ts`
   - local device persistence
   - per-device directory and JSON read/write
-  - low-frequency snapshot throttling
 
-- `src/domain/profiles/deviceProfileCatalog.json`
-  - device profile configuration
+- `../config/device/*.json` (plugin root, not under `backend/src`)
+  - one file per device model, e.g. `c4004.json`
   - metadata hints, marker values, entity signatures, capabilities, MQTT topic rules
+  - loaded by `src/domain/profiles/loadDeviceProfileDefinitions.ts`
 
 - `src/domain/profiles/registry.ts`
-  - profile registration and discovery resolution
+  - merges JSON definitions with runtime adapters
   - metadata / marker / override / entity signature matching
 
 - `src/domain/profiles/builtinProfiles.ts`
-  - currently implemented runtime profile adapters
+  - currently implemented runtime profile adapters (`c4004`)
 
 - `src/domain/mmwaveService.ts`
   - core aggregation layer
-  - overview, detail, refresh, reset logic
+  - overview, detail, refresh, soft reset, factory reset, config update
 
 - `src/domain/mqttBridge.ts`
   - MQTT connection management
   - topic subscription
-  - in-memory trajectory cache
+  - in-memory trajectory / tag-event / range result cache
 
 - `src/domain/trajectory.ts`
   - trajectory payload parsing
@@ -102,12 +105,14 @@ Configuration is loaded from `src/config.ts`.
 - `PORT`
 - `DATA_DIR`
 - `FRONTEND_DIST`
+- `DEVICE_PROFILE_DIR` (optional override for `config/device`)
 
 Default behavior:
 
 - Default persistence root is `/homeassistant/dfrobot_mmwave`
 - If the directory does not exist, backend creates it automatically
 - If `DATA_DIR` is explicitly set, it overrides the default
+- Device profile JSON defaults to plugin `config/device`
 
 ### 4.2 Home Assistant Config
 
@@ -151,18 +156,15 @@ The following data should be treated as formal runtime state from HA native enti
 - all zone moving/static counts
 - install mode and installation parameters
 - track-related numeric parameters
+- four-sided range numbers (`range_x_*` / `range_y_*`)
 
 ### 5.2 MQTT
 
 MQTT is currently used for:
 
 - `.../state/target_trajectory`
-
-Its role:
-
-- receive the latest trajectory payload
-- parse it into target points
-- expose live point data to overview/detail rendering
+- `.../state/tag_event`
+- multi-tag config / config-file-range / learned-trajectory-range command & result topics (see profile JSON)
 
 ### 5.3 Local JSON
 
@@ -172,6 +174,8 @@ Local JSON stores only low-frequency recoverable data:
 - local configuration
 - MQTT routing info
 - region config
+- event logs (`log/YYYY/MM/DD.jsonl`)
+- log retention policy
 
 Local JSON does not store:
 
@@ -203,6 +207,7 @@ Fixed files inside each device directory:
 
 ```text
 config.json
+log/YYYY/MM/DD.jsonl
 ```
 
 Notes:
@@ -211,6 +216,12 @@ Notes:
 - Old single-file storage is not used anymore
 - Directory name uses the current stable `device.id`
 - `devices.json` is a binding index with stable device routing fields
+
+Device model declarations (separate from dataDir):
+
+```text
+dfrobot_mmWave/config/device/<profileId>.json
+```
 
 ### 6.1 `config.json`
 
@@ -229,7 +240,9 @@ Fields:
 - `mqttKey`
 - `installInfo`
 - `detectionMode`
+- `deviceSettings`
 - `regionConfig`
+- `logRetention`
 
 `detectionMode` is numeric:
 
@@ -241,10 +254,6 @@ Fields:
 ### 6.2 Combined Runtime Object
 
 The service layer still works with full `StoredMmwaveDevice`, but it is now composed from `config.json`, live HA discovery, runtime cache, and the lightweight binding index.
-
-Internal persistence type:
-
-- `StoredDeviceMetaFile`
 
 ### 6.3 `devices.json`
 
@@ -282,9 +291,23 @@ Runtime state is not written to JSON.
 
 - HA discovery identity and status go to `RuntimeCacheStore`
 - HA native zone/range snapshots go to `RuntimeCacheStore`
-- MQTT trajectory snapshots go to `RuntimeCacheStore`
+- MQTT trajectory / tag-event snapshots go to `RuntimeCacheStore`
 
 Only explicit device configuration changes should rewrite `config.json`.
+
+### 7.3 Factory Reset
+
+`POST /api/mmwave/devices/:deviceId/actions/factory-reset`:
+
+1. Press HA `button.<prefix>_factory_reset`
+2. Wait 500ms
+3. Pull range box and device settings from HA into local storage
+4. Clear local `regionConfig.regions` (Overall Region remains UI + `zone1McuIo`)
+5. Keep `backgroundInstances`
+6. Do **not** push old tag/custom range config back to the device
+7. Update `RuntimeCacheStore.native.regionConfig` so the returned config is not stale
+
+Soft reset remains `actions/reset` and does not clear local tag regions.
 
 ## 8. Runtime Memory Model
 
@@ -294,12 +317,10 @@ Runtime state stays in memory:
 - latest native zone snapshot
 - latest `TrajectorySnapshot`
 - parsed target point list
+- tag-event overlays
 - MQTT connection state
 - WebSocket subscription state
-
-Trajectory source of truth:
-
-- `RuntimeCacheStore`
+- learned-range runtime status
 
 After backend restart:
 
@@ -309,7 +330,7 @@ After backend restart:
 
 ## 9. REST API
 
-Base routes:
+Base routes (see `README_API.md` for full contract):
 
 - `GET /api/health`
 - `GET /api/meta/config`
@@ -317,14 +338,23 @@ Base routes:
 - `GET /api/mmwave/devices`
 - `GET /api/mmwave/overview`
 - `GET /api/mmwave/devices/:deviceId/detail`
-- `POST /api/mmwave/devices/:deviceId/actions/reset`
+- `GET /api/mmwave/devices/:deviceId/config`
+- `PUT /api/mmwave/devices/:deviceId/config`
+- `GET /api/mmwave/devices/:deviceId/logs/calendar`
+- `GET /api/mmwave/devices/:deviceId/logs`
 - `POST /api/mmwave/devices/:deviceId/actions/refresh`
+- `POST /api/mmwave/devices/:deviceId/actions/reset`
+- `POST /api/mmwave/devices/:deviceId/actions/factory-reset`
+- `POST /api/mmwave/devices/:deviceId/actions/unbind`
+- `POST /api/mmwave/devices/:deviceId/actions/initialize`
+- `POST /api/mmwave/devices/:deviceId/actions/learned-range`
+- `GET|PUT|DELETE /api/mmwave/base-maps/user...`
 
 Behavior notes:
 
 - overview/detail DTOs are already frontend-oriented
 - frontend should not rebuild raw HA entities on its own
-- reset/refresh stay in service layer, not in frontend logic
+- reset / factory-reset / refresh stay in service layer, not in frontend logic
 
 ## 10. WebSocket
 
@@ -342,20 +372,20 @@ Current subscription model:
 Push behavior:
 
 - The backend subscribes to Home Assistant `state_changed` events.
-- Changes to `zone_1_presence` through `zone_6_presence` are routed by HA `device_id`.
-- The backend immediately sends a refresh message to the matching frontend device scope and the overview scope.
+- Changes to presence / zone entities are routed by HA device id.
+- MQTT tag events and learned-range updates also notify subscribed scopes.
 - Frontend polling remains at 2 seconds as a fallback for reconnects and missed events.
 
 ## 11. Current MQTT Subscription Rule
 
 The MQTT bridge subscribes per device through the resolved profile.
-Topic parts come from `src/domain/profiles/deviceProfileCatalog.json`:
+Topic parts come from `config/device/<profileId>.json`:
 
 ```text
-<mqttTopicPrefix>/<profile.mqttTopics.component>/<mqttKey>/<profile.mqttTopics.trajectoryStateTopic>
+<mqttTopicPrefix>/<profile.mqttTopics.component>/<mqttKey>/<suffix>
 ```
 
-For the current C4004 profile this resolves to:
+For the current C4004 profile trajectory resolves to:
 
 ```text
 <mqttTopicPrefix>/dfrobot_c4004/<mqttKey>/state/target_trajectory
@@ -367,13 +397,6 @@ Matching logic:
 - backend matches `topicPrefix + mqttKey` back to stored device info
 - matched snapshot is cached in memory under `device.id`
 
-Planned MQTT bridge topics that are not implemented in this backend pass:
-
-- `state/multi_tag_config`: future low-frequency memory/config view
-- `state/learned_trajectory_range`: future low-frequency memory/config view
-- `state/config_file_range`: future low-frequency memory/config view
-- `command/*/set` and `result/*/set`: future command/result flow, not part of the current implementation
-
 ## 12. Recommended Frontend Assumptions
 
 When writing frontend code, assume:
@@ -382,6 +405,7 @@ When writing frontend code, assume:
 - detail page receives ready-to-render chart layers and counts
 - trajectory can be absent even when device data exists
 - absence of MQTT must degrade gracefully, not fail the page
+- factory-reset response `config` should replace local region/parameter state immediately
 
 ## 13. Debugging Tips
 
@@ -391,6 +415,12 @@ If stored files are not appearing where expected, check in this order:
 2. runtime log line on backend startup
 3. whether `DATA_DIR` env overrides the default
 4. whether device discovery actually completed
+
+If profiles are missing:
+
+1. confirm `config/device/*.json` exists in the add-on package
+2. check `DEVICE_PROFILE_DIR`
+3. restart backend after editing JSON
 
 If live trajectory is missing, check:
 
@@ -404,9 +434,11 @@ If live trajectory is missing, check:
 When using AI to continue backend or frontend work, keep these constraints explicit:
 
 - Home Assistant native entities are the formal source of business state
-- MQTT is only for trajectory-style live payloads
+- MQTT is for trajectory / tag-event / range command result payloads
 - high-frequency trajectory must stay memory-only
 - storage root is `/homeassistant/dfrobot_mmwave`
 - each device uses `<deviceId>/config.json`
+- device model declarations live in `config/device/*.json`
 - runtime state uses `RuntimeCacheStore`, not JSON files
 - frontend should consume backend DTOs directly instead of rebuilding entity graphs
+- soft reset ≠ factory reset

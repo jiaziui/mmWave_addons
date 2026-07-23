@@ -1,86 +1,125 @@
 # DFRobot mmWave Add-on
 
-DFRobot mmWave is a Home Assistant add-on that provides a web console for mmWave sensor devices.
+DFRobot mmWave 是面向 Home Assistant 的毫米波传感器 Web 控制台插件。
 
-Current implementation focuses on:
+当前实现以 **DFRobot C4004** 为主，覆盖设备发现、总览、详情、区域管理、探测范围、事件日志与底图。
 
-- welcome page
-- device overview
-- device detail
-- Home Assistant device discovery
-- optional MQTT trajectory subscription
+## 功能概览
 
-## Features
+- 欢迎页（首次进入后记住，刷新直接进入控制台）
+- 设备总览 / 设备管理 / 区域管理
+- Home Assistant 设备发现与初始化绑定
+- 软复位（重启设备）与恢复出厂设置
+- 四方 / 自定义 / 学习探测范围
+- 标签区域编辑、导入导出、IO 联动
+- 区域事件日志与保留策略
+- 官方底图 + 用户上传底图
+- 可选 MQTT：实时轨迹与标签事件
 
-- Multi-device overview dashboard
-- Device detail panel with coordinate view
-- Region and target visualization
-- Device refresh and reset actions
-- Local low-frequency device persistence
-- MQTT-enabled live trajectory mode
+## 配置项
 
-## Configuration
-
-This add-on currently supports the following options:
+本插件当前支持以下选项：
 
 - `port`
-  - Web service port
-  - Default: `42069`
+  - Web 服务端口
+  - 默认：`42069`
 
 - `mqtt_host`
-  - MQTT broker host
-  - Leave empty to disable MQTT live trajectory mode
+  - MQTT broker 地址
+  - 留空则关闭 MQTT 实时轨迹 / 标签事件模式
 
 - `mqtt_port`
-  - MQTT broker port
-  - Default: `1883`
+  - MQTT 端口
+  - 默认：`1883`
 
 - `mqtt_username`
-  - Optional MQTT username
+  - 可选 MQTT 用户名
 
 - `mqtt_password`
-  - Optional MQTT password
+  - 可选 MQTT 密码
 
 - `mqtt_client_id`
-  - MQTT client ID used by the add-on
-  - Default: `dfrobot-mmwave-addon`
+  - 插件使用的 MQTT client ID
+  - 默认：`dfrobot-mmwave-addon`
 
-## Behavior
+## 行为说明
 
-When MQTT is configured:
+当已配置 MQTT：
 
-- the backend subscribes to device trajectory topics
-- live target points are available in the overview and detail pages
+- 后端订阅设备轨迹与标签事件等主题
+- 总览 / 详情 / 区域管理可显示实时目标点与区域事件
 
-When MQTT is not configured:
+当未配置 MQTT：
 
-- the add-on still works
-- Home Assistant entity data is still available
-- live target points are hidden and the UI enters degraded mode
+- 插件仍可用
+- Home Assistant 实体数据仍可读取
+- 实时轨迹点隐藏，界面进入降级模式
+- 本地已保存的区域配置、参数与历史日志仍可查看
 
-## Storage
+### 复位说明
 
-Default backend storage root:
+| 入口 | API | 含义 |
+| --- | --- | --- |
+| 详情页「重启设备」 | `POST .../actions/reset` | 软复位，不清理本地标签区域 |
+| 区域管理「恢复出厂设置」 | `POST .../actions/factory-reset` | 出厂后等待 0.5s，拉探测范围与参数，清空本地标签区域，保留底图 |
+
+## 存储
+
+默认后端存储根目录：
 
 ```text
 /homeassistant/dfrobot_mmwave
 ```
 
-Per-device files:
+布局：
 
 ```text
-/homeassistant/dfrobot_mmwave/<deviceId>/device.json
-/homeassistant/dfrobot_mmwave/<deviceId>/data.json
+/homeassistant/dfrobot_mmwave/devices.json
+/homeassistant/dfrobot_mmwave/<deviceId>/config.json
+/homeassistant/dfrobot_mmwave/<deviceId>/log/YYYY/MM/DD.jsonl
+/homeassistant/dfrobot_mmwave/base_maps/user/...
 ```
 
-Storage rules:
+规则：
 
-- `device.json` stores low-frequency device identity and region config
-- `data.json` stores discovery state and last zone summary
-- live trajectory data is memory-only and not persisted
+- `devices.json`：绑定索引与稳定路由字段
+- `config.json`：设备配置、区域、参数、日志保留策略
+- 实时轨迹等高频数据仅存内存，不落盘
+- 区域状态变化会写入事件日志 JSONL
 
-## Notes
+设备型号声明（插件源码，不在 dataDir）：
 
-- Current primary supported profile is `C4004`
-- Device management and region management pages are still placeholder pages in this revision
-- High-frequency MQTT trajectory data is not restored after backend restart
+```text
+config/device/<profileId>.json
+```
+
+例如：`config/device/c4004.json`。扩展新型号时优先新增该文件，详见 [新增设备型号接入说明](backend/README_ADD_DEVICE_PROFILE.md)。
+
+## 本地开发
+
+在 `dfrobot_mmWave/`：
+
+```bash
+npm install
+npm run dev
+```
+
+- 前端：`http://127.0.0.1:5173`
+- Mock：`http://127.0.0.1:5173/?mock=1`
+- 后端默认端口：`42069`
+
+## 相关文档
+
+- [仓库总说明](../README.md)
+- [插件商店说明](README.md)
+- [后端架构](backend/README.md)
+- [后端 API](backend/README_API.md)
+- [新增设备型号](backend/README_ADD_DEVICE_PROFILE.md)
+- [数据存储维护手册](backend/README_STORAGE.md)
+- [更新日志](CHANGELOG.md)
+
+## 备注
+
+- 当前完整运行时适配器已实现 `C4004`
+- 其它型号可通过 `config/device/*.json` 参与扫描；完整控制仍需对应 runtime adapter
+- 后端重启后，实时轨迹需等待新的 MQTT 消息恢复

@@ -69,10 +69,10 @@ interface StoredMmwaveDevice {
   deviceNo?: string;
   initialized: boolean;
 
-  profileId: "c4004";
+  profileId: string; // 来自 config/device/*.json 的设备 profile id，当前运行时适配器已实现 c4004
   profileSource?: "metadata" | "marker" | "override" | "signature";
   profileStatus: "resolved" | "unresolved" | "unsupported";
-  profileOverride?: "c4004";
+  profileOverride?: string;
 
   haDeviceId?: string;
   name: string;
@@ -319,7 +319,8 @@ GET /api/mmwave/devices/discover
 行为：
 
 - 如果 Home Assistant 已连接，从 HA 拉取实体并进行 profile 识别。
-- 当前只支持 `c4004` profile。
+- 识别规则来自插件目录 `config/device/*.json`（例如 `c4004.json`）；每加一份设备配置文件即可参与扫描匹配。
+- 完整读写/动作能力仍取决于后端是否有对应运行时适配器；当前已实现 `c4004`。
 - 会刷新内存运行态缓存。
 - 对已绑定设备，会更新 `devices.json` 里的稳定路由字段。
 
@@ -829,7 +830,7 @@ POST /api/mmwave/devices/:deviceId/actions/refresh
 | `404` | 设备不存在 |
 | `502` | 刷新失败 |
 
-### 5.8 重置设备
+### 5.8 重置设备（软复位）
 
 ```http
 POST /api/mmwave/devices/:deviceId/actions/reset
@@ -837,8 +838,9 @@ POST /api/mmwave/devices/:deviceId/actions/reset
 
 行为：
 
-- C4004 会调用 `button.<prefix>_reset`。
+- C4004 会调用 `button.<prefix>_reset`（设备软复位，不是出厂）。
 - 成功后返回最新详情。
+- 与 `factory-reset` 区分：本接口不清理后端本地标签区域，也不主动从设备重拉探测范围/参数。
 
 成功响应：
 
@@ -856,7 +858,41 @@ POST /api/mmwave/devices/:deviceId/actions/reset
 | `404` | 设备不存在 |
 | `502` | HA 未连接、profile 不支持 reset、或 HA 调用失败 |
 
-### 5.9 解绑设备
+### 5.9 恢复出厂设置
+
+```http
+POST /api/mmwave/devices/:deviceId/actions/factory-reset
+```
+
+行为（后端编排）：
+
+1. 调用 HA `button.<prefix>_factory_reset` 触发设备出厂复位。
+2. 等待 `500ms`。
+3. 从 HA 重新读取探测范围（`range_*`）与设备参数设置，写入本地 `config.json`。
+4. 清空本地标签区域：`regionConfig.regions = []`（整体区域由 UI + `zone1McuIo` 表达，不在 `regions[]` 中）。
+5. **保留**底图 `backgroundInstances`、坐标系与视图偏好。
+6. **不会**把旧的标签区域 / 自定义范围重新推送到设备（不调用 `apply.tagConfig` / `apply.regionMcuIo` / `apply.customRange` / `apply.fourSidedRange`）。
+7. 同步更新 runtime cache 中的 `regionConfig`，避免返回仍带旧区域的缓存数据。
+
+成功响应：
+
+```json
+{
+  "ok": true,
+  "config": {}
+}
+```
+
+`config` 结构与「获取设备配置」相同（`MmwaveDeviceConfig`），前端应直接用返回值刷新区域列表、探测范围与参数面板。
+
+失败状态码：
+
+| 状态码 | 说明 |
+| --- | --- |
+| `404` | 设备不存在 |
+| `502` | HA 未连接、profile 不支持 factory reset、或 HA/同步失败 |
+
+### 5.10 解绑设备
 
 ```http
 POST /api/mmwave/devices/:deviceId/actions/unbind
@@ -885,7 +921,7 @@ POST /api/mmwave/devices/:deviceId/actions/unbind
 | `404` | 设备不存在 |
 | `502` | 解绑失败 |
 
-### 5.10 初始化设备
+### 5.11 初始化设备
 
 ```http
 POST /api/mmwave/devices/:deviceId/actions/initialize
@@ -969,7 +1005,7 @@ interface InitializeDeviceRequest {
 | `424` | Home Assistant 未连接 |
 | `502` | HA 写入失败或其他初始化失败 |
 
-### 5.11 学习探测范围状态机
+### 5.12 学习探测范围状态机
 
 ```http
 POST /api/mmwave/devices/:deviceId/actions/learned-range
@@ -1098,7 +1134,16 @@ Content-Type: multipart/form-data
 - 仅接受 PNG、JPEG、WebP，单文件最大 10MB。
 - 后端同时核对 MIME、扩展名和文件头；SVG、伪造类型和路径穿越均拒绝。
 - 上传成功只加入全局图库，不会自动创建任何设备的 `backgroundInstances`。
-- 当前不提供全局素材删除接口；从画布移除只更新设备自己的 `regionConfig`。
+
+### 6.4 删除用户底图
+
+```http
+DELETE /api/mmwave/base-maps/user/:assetId
+```
+
+- 成功响应：`{ "ok": true }`
+- 素材不存在或 `assetId` 非法时返回 `404`
+- 仅删除全局图库中的素材文件与索引；不会自动清理各设备 `regionConfig.backgroundInstances` 中的引用，前端删除素材后应自行处理仍引用该素材的实例。
 
 ## 7. 前端推荐调用流程
 
@@ -1138,7 +1183,21 @@ POST /api/mmwave/devices/:deviceId/actions/unbind
 GET /api/mmwave/devices
 ```
 
-### 7.6 总览和详情实时刷新
+### 7.6 恢复出厂设置（区域管理参数面板）
+
+```text
+POST /api/mmwave/devices/:deviceId/actions/factory-reset
+```
+
+前端拿到返回的 `config` 后应：
+
+- 用 `config.regionConfig` 刷新探测范围与标签区域列表（`regions` 应为 `[]`）
+- 用 `config.deviceSettings` 刷新参数面板
+- 可选再调一次 `GET .../detail`，避免详情 overlay 仍显示旧区域
+
+注意：详情页「重启设备」仍走 `actions/reset`，不要与出厂混淆。
+
+### 7.7 总览和详情实时刷新
 
 ```text
 页面可见时：每 2 秒 GET /api/mmwave/overview
@@ -1166,6 +1225,14 @@ GET /api/mmwave/devices
 /homeassistant/dfrobot_mmwave/base_maps/user/<assetId>.<ext>
 ```
 
+设备 profile 配置（扫描签名与能力声明）位于插件源码目录，不在 dataDir：
+
+```text
+config/device/<profileId>.json
+```
+
+例如 `config/device/c4004.json`。启动时后端会扫描该目录下全部 `*.json`；扩展新机型时先加配置文件参与发现，再补运行时适配器以获得完整控制能力。
+
 `devices.json` 保存绑定索引和稳定路由字段：
 
 ```ts
@@ -1187,8 +1254,8 @@ interface StoredDeviceBinding {
 ```ts
 interface StoredDeviceConfig {
   id: string;
-  profileId: "c4004";
-  profileOverride?: "c4004";
+  profileId: string;
+  profileOverride?: string;
   haDeviceId?: string;
   macAddress?: string;
   deploymentName?: string;
@@ -1218,16 +1285,17 @@ interface StoredDeviceConfig {
 - rangeBox 当前值
 - 轨迹点 targets
 - MQTT 轨迹 hex
+- 本地 `regionConfig` 的运行时覆盖（`RuntimeCacheStore.native.regionConfig`；出厂复位后会同步清空标签区域缓存）
 
 ## 9. 当前限制
 
-- 当前只实现 C4004 后端能力。
-- C4001/C4002/C4003 当前没有启用 profile 配置。
+- 运行时完整能力当前只实现了 C4004；其它机型可通过 `config/device/*.json` 参与扫描，但未提供适配器前无法完整控制。
+- C4001/C4002/C4003 当前没有启用 profile 配置文件。
+- `actions/reset` 为软复位；`actions/factory-reset` 为出厂复位并重同步本地探测范围/参数、清空本地标签区域，底图保留。
 - 学习探测范围已接入 C4004 `learned_trajectory_range` MQTT command/result 闭环，停止学习后才查询最终点集。
-- 自定义探测范围支持 `.ini` 导入/导出；标签区域支持 `.ini` 导入/导出，学习探测范围仍未接入设备。
+- 自定义探测范围支持 `.ini` 导入/导出；标签区域支持 `.ini` 导入/导出。
 - 学习范围确认计数、学习状态和查询结果通过设备级 WebSocket 刷新前端。
 - `config_file_range` 只有设备确认成功后才落盘到 `config.json`。
-
 ## 10. 标签区域 MQTT 事件与配置闭环
 
 本节为当前新增链路。区域实时信息不再从 HA zone 实体读取，改为从 C4004 MQTT `state/tag_event` 事件进入后端内存缓存。

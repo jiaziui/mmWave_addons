@@ -78,6 +78,8 @@ export interface BaseMapInstance {
   yCm: number;
   widthCm: number;
   heightCm: number;
+  /** Degrees; rotate around image center. */
+  rotationDeg?: number;
   visible: boolean;
   zIndex: number;
 }

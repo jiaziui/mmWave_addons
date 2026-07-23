@@ -3,6 +3,8 @@ import {
   canExportCustomRange,
   convertLegacyRegion,
   formatRegionLiveInfo,
+  getDetectionExportBlocker,
+  getDetectionExportPoints,
   getDetectionHint,
   mergeImportedRegions,
   parseImportedDetection,
@@ -147,6 +149,58 @@ describe("regionManagement", () => {
     ]);
     expect(serializeCustomRangeIni(points)).toBe("(200,0)\r\n(200,400)\r\n(-200,400)\r\n(-200,0)");
     expect(canExportCustomRange(points)).toBe(true);
+  });
+
+  it("exports rect mode as four corner points and learned mode as learned points", () => {
+    const rectPoints = getDetectionExportPoints({
+      mode: "rect",
+      appliedMode: "rect",
+      rectCm: { xMin: -200, xMax: 200, yMin: 0, yMax: 400 },
+      learnedPointsCm: [],
+      customPointsCm: [],
+      customConfirmed: false,
+    });
+    expect(rectPoints).toEqual([
+      { x: -200, y: 0 },
+      { x: 200, y: 0 },
+      { x: 200, y: 400 },
+      { x: -200, y: 400 },
+    ]);
+    expect(getDetectionExportBlocker({
+      mode: "rect",
+      appliedMode: "rect",
+      rectCm: { xMin: -200, xMax: 200, yMin: 0, yMax: 400 },
+      learnedPointsCm: [],
+      customPointsCm: [],
+      customConfirmed: false,
+    })).toBeNull();
+    expect(serializeCustomRangeIni(rectPoints)).toBe("(200,0)\r\n(-200,0)\r\n(-200,400)\r\n(200,400)");
+
+    const learnedPoints = getDetectionExportPoints({
+      mode: "learned",
+      appliedMode: "learned",
+      rectCm: { xMin: -200, xMax: 200, yMin: 0, yMax: 400 },
+      learnedPointsCm: [
+        { x: -100.4, y: 10.2 },
+        { x: 100.6, y: 10.8 },
+        { x: 0, y: 300 },
+      ],
+      customPointsCm: [],
+      customConfirmed: false,
+    });
+    expect(learnedPoints).toEqual([
+      { x: -100, y: 10 },
+      { x: 101, y: 11 },
+      { x: 0, y: 300 },
+    ]);
+    expect(getDetectionExportBlocker({
+      mode: "learned",
+      appliedMode: "learned",
+      rectCm: { xMin: -200, xMax: 200, yMin: 0, yMax: 400 },
+      learnedPointsCm: [{ x: 1, y: 2 }],
+      customPointsCm: [],
+      customConfirmed: false,
+    })).toContain("至少需要 3 个点");
   });
 
   it("accepts custom range point limits and rejects invalid files", () => {

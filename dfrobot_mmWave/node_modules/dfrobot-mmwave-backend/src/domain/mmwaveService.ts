@@ -824,9 +824,20 @@ export class MmwaveService {
     }
 
     if (regionConfigProvided || input.apply?.tagConfig) {
+      const previousAppliedMode =
+        device.regionConfig.detection.appliedMode ?? device.regionConfig.detection.mode;
       const normalized = normalizedRegionConfig;
+      // 切换探测范围草稿时，未同步成功前不要把 appliedMode 写成目标模式（固件仍是学习范围等）
+      const pendingDetection = input.apply?.fourSidedRange
+        ? {
+            ...normalized.detection,
+            mode: "rect" as const,
+            appliedMode: previousAppliedMode,
+          }
+        : normalized.detection;
       const pendingConfig: StoredRegionConfig = {
         ...normalized,
+        detection: pendingDetection,
         syncState: {
           ...normalized.syncState,
           fourSidedRange: input.apply?.fourSidedRange ? "pending" : normalized.syncState.fourSidedRange,
@@ -847,6 +858,14 @@ export class MmwaveService {
           try {
             await profile.applyFourSidedRange(this.haClient, device, device.regionConfig.rangeBox);
             applyResult.fourSidedRange = "applied";
+            device = this.storage.updateRegionConfig(deviceId, {
+              ...device.regionConfig,
+              detection: {
+                ...device.regionConfig.detection,
+                mode: "rect",
+                appliedMode: "rect",
+              },
+            });
           } catch (error) {
             applyResult.fourSidedRange = "failed";
             applyResult.warnings.push(
@@ -960,6 +979,11 @@ export class MmwaveService {
     const current = this.storage.validateInitializeDevice(deviceId, payload);
     if (!this.haClient) {
       throw new Error("Home Assistant is not linked");
+    }
+
+    const cached = this.runtimeCache.hydrateDevice(current);
+    if (cached.discovery.status !== "online") {
+      throw new Error("设备离线，无法进行初始化绑定");
     }
 
     const profile = getMmwaveProfile(current.profileId);

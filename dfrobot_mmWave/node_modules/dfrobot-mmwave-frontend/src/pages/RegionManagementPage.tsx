@@ -33,6 +33,8 @@ import {
   canExportCustomRange,
   downloadText,
   formatRegionLiveInfo,
+  getDetectionExportBlocker,
+  getDetectionExportPoints,
   getDetectionHint,
   mergeImportedRegions,
   MCU_IO_OPTIONS,
@@ -56,8 +58,92 @@ type DragState =
   | { kind: "region-resize"; pointerId: number; regionId: string; handle: string; geometry: RegionGeometry }
   | { kind: "detection-resize"; pointerId: number; handle: "n" | "e" | "s" | "w" | "nw" | "ne" | "se" | "sw"; rect: { xMin: number; xMax: number; yMin: number; yMax: number } }
   | { kind: "background"; pointerId: number; instanceId: string; startWorldX: number; startWorldY: number; instance: BaseMapInstance }
-  | { kind: "background-resize"; pointerId: number; instanceId: string; instance: BaseMapInstance }
+  | {
+      kind: "background-resize";
+      pointerId: number;
+      instanceId: string;
+      handle: "nw" | "ne" | "se" | "sw";
+      instance: BaseMapInstance;
+      centerXCm: number;
+      centerYCm: number;
+    }
+  | {
+      kind: "background-rotate";
+      pointerId: number;
+      instanceId: string;
+      startAngleDeg: number;
+      startRotationDeg: number;
+      instance: BaseMapInstance;
+    }
   | null;
+
+type BackgroundCornerHandle = "nw" | "ne" | "se" | "sw";
+
+const BG_MIN_SIZE_CM = 40;
+
+const normalizeRotationDeg = (value: number) => {
+  const normalized = ((value % 360) + 360) % 360;
+  return Math.round(normalized * 10) / 10;
+};
+
+/** Screen/SVG-compatible angle from image center to world point (clockwise positive). */
+const angleDegFromCenter = (centerXCm: number, centerYCm: number, worldX: number, worldY: number) =>
+  (Math.atan2(-(worldY - centerYCm), worldX - centerXCm) * 180) / Math.PI;
+
+/** World delta -> local (y-up), matching SVG rotate(rotationDeg). */
+const worldDeltaToBackgroundLocal = (rotationDeg: number, dx: number, dy: number) => {
+  const rad = (rotationDeg * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  return {
+    x: dx * cos + dy * sin,
+    y: -dx * sin + dy * cos,
+  };
+};
+
+/** Scale from image center; keep aspect ratio; support rotated images. */
+const resizeBackgroundByCorner = (
+  instance: BaseMapInstance,
+  handle: BackgroundCornerHandle,
+  centerXCm: number,
+  centerYCm: number,
+  pointerWorldX: number,
+  pointerWorldY: number,
+): Pick<BaseMapInstance, "xCm" | "yCm" | "widthCm" | "heightCm" | "rotationDeg"> => {
+  const startW = Math.max(1, instance.widthCm);
+  const startH = Math.max(1, instance.heightCm);
+  const rotationDeg = instance.rotationDeg ?? 0;
+  const local = worldDeltaToBackgroundLocal(
+    rotationDeg,
+    pointerWorldX - centerXCm,
+    pointerWorldY - centerYCm,
+  );
+
+  // Half-size from center to pointer (handle quadrant)
+  let halfW = Math.abs(local.x);
+  let halfH = Math.abs(local.y);
+  if (handle === "se" || handle === "ne") halfW = Math.max(0, local.x);
+  if (handle === "nw" || handle === "sw") halfW = Math.max(0, -local.x);
+  if (handle === "ne" || handle === "nw") halfH = Math.max(0, local.y);
+  if (handle === "se" || handle === "sw") halfH = Math.max(0, -local.y);
+
+  const scale = Math.max(
+    BG_MIN_SIZE_CM / startW,
+    BG_MIN_SIZE_CM / startH,
+    (halfW * 2) / startW,
+    (halfH * 2) / startH,
+  );
+  const widthCm = Math.max(BG_MIN_SIZE_CM, Math.round(startW * scale));
+  const heightCm = Math.max(BG_MIN_SIZE_CM, Math.round(startH * scale));
+
+  return {
+    xCm: Math.round(centerXCm - widthCm / 2),
+    yCm: Math.round(centerYCm - heightCm / 2),
+    widthCm,
+    heightCm,
+    rotationDeg,
+  };
+};
 
 const REGION_COLORS: Record<RegionType, string> = {
   status_detection: "#FFA94D",
@@ -580,6 +666,23 @@ export function RegionManagementPage({
         onError(response.applyResult.warnings.join("；") || "自定义探测范围同步失败，当前草稿未保存");
         return false;
       }
+      if (apply?.fourSidedRange && response.applyResult.fourSidedRange !== "applied") {
+        // 四方未同步成功时保持固件生效范围（如学习范围），不把 appliedMode 切走
+        setCurrentConfig({
+          ...response.config,
+          regionConfig: {
+            ...response.config.regionConfig,
+            detection: {
+              ...response.config.regionConfig.detection,
+              mode: "rect",
+              appliedMode: deviceConfig.regionConfig.detection.appliedMode ?? deviceConfig.regionConfig.detection.mode,
+            },
+          },
+        });
+        setDirty(true);
+        onError(response.applyResult.warnings.join("；") || "四方探测范围同步失败，画面仍显示当前生效范围");
+        return false;
+      }
       setCurrentConfig(response.config);
       const failedRequiredApply = options?.requireApplied?.find(
         (key) => response.applyResult[key] !== "applied",
@@ -944,7 +1047,6 @@ export function RegionManagementPage({
         next.detection = {
           ...next.detection,
           mode: "custom",
-          appliedMode: "custom",
           customConfirmed: true,
           customPointsCm: points,
         };
@@ -986,17 +1088,15 @@ export function RegionManagementPage({
       return;
     }
     if (action === "export-detection") {
-      if (regionConfig.detection.mode !== "custom") {
-        onError("当前范围模式不是自定义探测范围，无法导出");
+      const blocker = getDetectionExportBlocker(regionConfig.detection);
+      if (blocker) {
+        onError(blocker);
         return;
       }
-      if (!canExportCustomRange(regionConfig.detection.customPointsCm)) {
-        onError("当前自定义探测范围点数据无效，至少需要 3 个有效点");
-        return;
-      }
+      const points = getDetectionExportPoints(regionConfig.detection);
       downloadText(
-        `device-${selectedDevice.deviceNo ?? selectedDevice.id}-custom-detection-range.ini`,
-        serializeCustomRangeIni(regionConfig.detection.customPointsCm),
+        `device-${selectedDevice.deviceNo ?? selectedDevice.id}-detection-range.ini`,
+        serializeCustomRangeIni(points),
         { includeUtf8Bom: true },
       );
       return;
@@ -1087,6 +1187,7 @@ export function RegionManagementPage({
       yCm: Math.round(viewportCenterYCm - heightCm / 2),
       widthCm,
       heightCm,
+      rotationDeg: 0,
       visible: true,
       zIndex: next.backgroundInstances.length,
     });
@@ -1098,7 +1199,7 @@ export function RegionManagementPage({
     if (saved) {
       setSelectedBackgroundId(instanceId);
       setBackgroundVisible(true);
-      setBackgroundMessage("已添加（统一宽约 2m）。拖动/缩放手柄调位置与大小，Delete 删除");
+      setBackgroundMessage("已添加（统一宽约 2m）。拖动/四角缩放/旋转手柄调整，Delete 删除");
       onMessage("底图已添加到当前设备画布");
     }
   };
@@ -1256,6 +1357,7 @@ export function RegionManagementPage({
     const resizeTarget = target.closest<SVGElement>("[data-region-resize]");
     const detectionResize = target.closest<SVGElement>("[data-detection-handle]");
     const regionTarget = target.closest<SVGElement>("[data-region-id]");
+    const backgroundRotate = target.closest<SVGElement>("[data-bg-rotate]");
     const backgroundResize = target.closest<SVGElement>("[data-bg-resize]");
     const backgroundTarget = target.closest<SVGElement>("[data-bg-id]");
     if (!readOnly && activePanel === "detection" && detectionResize && regionConfig.detection.mode === "rect") {
@@ -1302,9 +1404,36 @@ export function RegionManagementPage({
           geometry: structuredClone((draft ?? region).geometry),
         });
       }
+    } else if (!readOnly && activePanel === "background" && backgroundRotate) {
+      const instance = regionConfig.backgroundInstances.find((entry) => entry.id === backgroundRotate.dataset.bgRotate);
+      if (instance) {
+        setSelectedBackgroundId(instance.id);
+        const centerXCm = instance.xCm + instance.widthCm / 2;
+        const centerYCm = instance.yCm + instance.heightCm / 2;
+        setDragState({
+          kind: "background-rotate",
+          pointerId: event.pointerId,
+          instanceId: instance.id,
+          startAngleDeg: angleDegFromCenter(centerXCm, centerYCm, world.x, world.y),
+          startRotationDeg: instance.rotationDeg ?? 0,
+          instance: structuredClone(instance),
+        });
+      }
     } else if (!readOnly && activePanel === "background" && backgroundResize) {
       const instance = regionConfig.backgroundInstances.find((entry) => entry.id === backgroundResize.dataset.bgResize);
-      if (instance) setDragState({ kind: "background-resize", pointerId: event.pointerId, instanceId: instance.id, instance: structuredClone(instance) });
+      const handle = backgroundResize.dataset.handle as BackgroundCornerHandle | undefined;
+      if (instance && handle && ["nw", "ne", "se", "sw"].includes(handle)) {
+        setSelectedBackgroundId(instance.id);
+        setDragState({
+          kind: "background-resize",
+          pointerId: event.pointerId,
+          instanceId: instance.id,
+          handle,
+          instance: structuredClone(instance),
+          centerXCm: instance.xCm + instance.widthCm / 2,
+          centerYCm: instance.yCm + instance.heightCm / 2,
+        });
+      }
     } else if (!readOnly && activePanel === "background" && backgroundTarget) {
       const instance = regionConfig.backgroundInstances.find((entry) => entry.id === backgroundTarget.dataset.bgId);
       if (instance) {
@@ -1397,6 +1526,13 @@ export function RegionManagementPage({
       setDirty(true);
       return;
     }
+    if (
+      dragState.kind !== "background"
+      && dragState.kind !== "background-resize"
+      && dragState.kind !== "background-rotate"
+    ) {
+      return;
+    }
     const current = configRef.current;
     if (!current) return;
     const next = cloneConfig(current.regionConfig);
@@ -1405,10 +1541,27 @@ export function RegionManagementPage({
     if (dragState.kind === "background") {
       instance.xCm = Math.round(dragState.instance.xCm + world.x - dragState.startWorldX);
       instance.yCm = Math.round(dragState.instance.yCm + world.y - dragState.startWorldY);
+    } else if (dragState.kind === "background-rotate") {
+      const centerXCm = dragState.instance.xCm + dragState.instance.widthCm / 2;
+      const centerYCm = dragState.instance.yCm + dragState.instance.heightCm / 2;
+      const angleDeg = angleDegFromCenter(centerXCm, centerYCm, world.x, world.y);
+      instance.rotationDeg = normalizeRotationDeg(
+        dragState.startRotationDeg + (angleDeg - dragState.startAngleDeg),
+      );
     } else {
-      const ratio = dragState.instance.widthCm / Math.max(1, dragState.instance.heightCm);
-      instance.widthCm = Math.max(40, Math.round(world.x - dragState.instance.xCm));
-      instance.heightCm = Math.max(40, Math.round(instance.widthCm / ratio));
+      const resized = resizeBackgroundByCorner(
+        dragState.instance,
+        dragState.handle,
+        dragState.centerXCm,
+        dragState.centerYCm,
+        world.x,
+        world.y,
+      );
+      instance.xCm = resized.xCm;
+      instance.yCm = resized.yCm;
+      instance.widthCm = resized.widthCm;
+      instance.heightCm = resized.heightCm;
+      instance.rotationDeg = resized.rotationDeg;
     }
     setCurrentConfig({ ...current, regionConfig: next });
     setDirty(true);
@@ -1607,9 +1760,17 @@ export function RegionManagementPage({
     activePanel === "background" ? "is-bg-editing" : "",
     activePanel === "detection" ? "is-detection-editing" : "",
   ].filter(Boolean).join(" ");
-  const visibleDetectionMode = activePanel === "detection"
-    ? detection.mode
-    : (detection.appliedMode ?? detection.mode);
+  // 画布始终按固件已生效范围显示；切换草稿模式但未同步成功时仍显示 appliedMode（如学习范围）
+  const appliedDetectionMode = detection.appliedMode ?? detection.mode;
+  const visibleDetectionMode =
+    activePanel === "detection" && detection.mode === appliedDetectionMode
+      ? detection.mode
+      : appliedDetectionMode;
+  const showCustomDraftOverlay =
+    activePanel === "detection"
+    && detection.mode === "custom"
+    && appliedDetectionMode !== "custom"
+    && detection.customPointsCm.length >= 1;
   const learnedDisplayPoints =
     visibleDetectionMode === "learned" && !learningLocked
       ? detection.learnedPointsCm
@@ -1651,7 +1812,7 @@ export function RegionManagementPage({
             {menuOpen ? <div className="region-dropdown">
               <button type="button" disabled={readOnly} onClick={() => handleMenuAction("import-image")}>导入图片</button>
               <button type="button" disabled={readOnly} onClick={() => handleMenuAction("import-detection")}>导入自定义探测范围配置</button>
-              <button type="button" onClick={() => handleMenuAction("export-detection")}>导出自定义探测范围配置</button>
+              <button type="button" onClick={() => handleMenuAction("export-detection")}>导出探测范围配置</button>
               <button type="button" disabled={readOnly} onClick={() => handleMenuAction("import-regions")}>导入标签区域配置</button>
               <button type="button" onClick={() => handleMenuAction("export-regions")}>导出标签区域配置</button>
             </div> : null}
@@ -1700,22 +1861,69 @@ export function RegionManagementPage({
           {backgroundVisible ? [...regionConfig.backgroundInstances].sort((a, b) => a.zIndex - b.zIndex).map((instance) => {
             if (!instance.visible) return null;
             const selected = selectedBackgroundId === instance.id && activePanel === "background";
-            return <g key={instance.id}>
-              <image
-                href={sourceUrl(instance.sourceType, instance.sourceId)}
-                x={tx(instance.xCm)}
-                y={ty(instance.yCm + instance.heightCm)}
-                width={instance.widthCm * scale}
-                height={instance.heightCm * scale}
-                opacity={selected ? 0.78 : 0.48}
-                data-bg-id={instance.id}
-                preserveAspectRatio="none"
-              />
-              {selected ? <>
-                <rect x={tx(instance.xCm)} y={ty(instance.yCm + instance.heightCm)} width={instance.widthCm * scale} height={instance.heightCm * scale} className="background-selection" />
-                <circle data-bg-resize={instance.id} cx={tx(instance.xCm + instance.widthCm)} cy={ty(instance.yCm)} r="7" className="workspace-resize-handle region-detection-handle" />
-              </> : null}
-            </g>;
+            const imgX = tx(instance.xCm);
+            const imgY = ty(instance.yCm + instance.heightCm);
+            const imgW = instance.widthCm * scale;
+            const imgH = instance.heightCm * scale;
+            const centerX = imgX + imgW / 2;
+            const centerY = imgY + imgH / 2;
+            const rotationDeg = instance.rotationDeg ?? 0;
+            const rotateHandleY = imgY - 28;
+            return (
+              <g key={instance.id} transform={`rotate(${rotationDeg} ${centerX} ${centerY})`}>
+                <image
+                  href={sourceUrl(instance.sourceType, instance.sourceId)}
+                  x={imgX}
+                  y={imgY}
+                  width={imgW}
+                  height={imgH}
+                  opacity={selected ? 0.78 : 0.48}
+                  data-bg-id={instance.id}
+                  preserveAspectRatio="none"
+                />
+                {selected ? (
+                  <>
+                    <rect x={imgX} y={imgY} width={imgW} height={imgH} className="background-selection" />
+                    <circle
+                      className="workspace-region-center region-center-point background-center-point"
+                      cx={centerX}
+                      cy={centerY}
+                      r="4"
+                    />
+                    <line
+                      className="workspace-rotate-line"
+                      x1={centerX}
+                      y1={imgY}
+                      x2={centerX}
+                      y2={rotateHandleY}
+                    />
+                    <circle
+                      data-bg-rotate={instance.id}
+                      cx={centerX}
+                      cy={rotateHandleY}
+                      r="7"
+                      className="workspace-rotate-handle"
+                    />
+                    {([
+                      ["nw", imgX, imgY],
+                      ["ne", imgX + imgW, imgY],
+                      ["se", imgX + imgW, imgY + imgH],
+                      ["sw", imgX, imgY + imgH],
+                    ] as const).map(([handle, hx, hy]) => (
+                      <circle
+                        key={handle}
+                        data-bg-resize={instance.id}
+                        data-handle={handle}
+                        cx={hx}
+                        cy={hy}
+                        r="7"
+                        className="workspace-resize-handle region-detection-handle"
+                      />
+                    ))}
+                  </>
+                ) : null}
+              </g>
+            );
           }) : null}
           <g className="region-axis-layer">
             {gridVisible ? <>
@@ -1752,9 +1960,9 @@ export function RegionManagementPage({
               )) : null}
             </g>
           ) : null}
-          {visibleDetectionMode === "custom" && detection.customPointsCm.length >= 1 ? (
+          {(visibleDetectionMode === "custom" || showCustomDraftOverlay) && detection.customPointsCm.length >= 1 ? (
             <g className="region-detection-range-layer">
-              {detection.customPointsCm.length >= 3 ? (
+              {visibleDetectionMode === "custom" && detection.customPointsCm.length >= 3 ? (
                 <polygon className="range-custom-polygon workspace-detection-range custom" points={detection.customPointsCm.map((point) => `${tx(point.x)},${ty(point.y)}`).join(" ")} />
               ) : null}
               {detection.customPointsCm.length >= 2 ? (
@@ -1817,7 +2025,7 @@ export function RegionManagementPage({
               <h3>区域列表</h3>
               <div className="region-panel-head-actions">
                 <button type="button" className="region-sync-btn" onClick={() => void syncAllRegions()} disabled={readOnly || saving}>同步</button>
-                <button type="button" className="region-add-btn" onClick={addRegion} disabled={readOnly || regionConfig.regions.length >= 32}>+ 新增</button>
+                <button type="button" className="region-panel-close" aria-label="关闭" onClick={() => togglePanel("regions")}>×</button>
               </div>
             </div>
             <div className="region-list-body">
@@ -1851,11 +2059,17 @@ export function RegionManagementPage({
                   );
                 }) : <div className="region-panel-empty">暂无标签区域，点击“新增”开始配置。</div>}
             </div>
-            <div className="region-panel-foot"><span>总计: <strong>{regionConfig.regions.length + 1}</strong> 个区域（含整体区域）</span></div>
+            <div className="region-panel-foot">
+              <span>总计: <strong>{regionConfig.regions.length + 1}</strong> 个区域（含整体区域）</span>
+              <button type="button" className="region-add-btn" onClick={addRegion} disabled={readOnly || regionConfig.regions.length >= 32}>+ 新增</button>
+            </div>
           </> : null}
 
           {activePanel === "edit" && overallMcuIoDraft !== null ? <>
-            <div className="region-panel-head"><h3>整体区域配置</h3><button type="button" onClick={() => { clearRegionEditSession(); setActivePanel("regions"); }}>关闭</button></div>
+            <div className="region-panel-head">
+              <h3>整体区域配置</h3>
+              <button type="button" className="region-panel-close" aria-label="关闭" onClick={() => { clearRegionEditSession(); setActivePanel("regions"); }}>×</button>
+            </div>
             <div className="region-form-grid">
               <label className="region-form-full"><span>MCU侧IO（传感器 IO1）</span><select disabled={readOnly || saving} value={overallMcuIoDraft} onChange={(event) => setOverallMcuIoDraft(Number(event.target.value))}>{MCU_IO_OPTIONS.map((value) => <option value={value} key={value}>{value < 0 ? "无" : value}</option>)}</select></label>
             </div>
@@ -1863,7 +2077,10 @@ export function RegionManagementPage({
           </> : null}
 
           {activePanel === "edit" && regionDraft ? <>
-            <div className="region-panel-head"><h3>区域配置</h3><button type="button" onClick={() => discardRegionEdits()}>关闭</button></div>
+            <div className="region-panel-head">
+              <h3>区域配置</h3>
+              <button type="button" className="region-panel-close" aria-label="关闭" onClick={() => discardRegionEdits()}>×</button>
+            </div>
             <div className="region-form-grid">
               <label><span>区域名称</span><input disabled={readOnly} value={regionDraft.label} onChange={(event) => updateRegionDraft({ ...regionDraft, label: event.target.value })} /></label>
               <label><span>区域索引</span><input disabled={readOnly} type="number" min="0" max="31" value={regionDraft.index} onChange={(event) => {
@@ -1920,7 +2137,10 @@ export function RegionManagementPage({
                 <h3>参数配置</h3>
                 {readOnly ? <span>离线缓存，只读</span> : null}
               </div>
-              <button type="button" disabled={readOnly || saving} onClick={() => void syncSettings()}>同步</button>
+              <div className="region-panel-head-actions">
+                <button type="button" disabled={readOnly || saving} onClick={() => void syncSettings()}>同步</button>
+                <button type="button" className="region-panel-close" aria-label="关闭" onClick={() => togglePanel("parameters")}>×</button>
+              </div>
             </div>
             <section className="parameter-section">
               <h4>指示灯设置</h4>
@@ -1947,7 +2167,13 @@ export function RegionManagementPage({
           </> : null}
 
           {activePanel === "background" ? <>
-            <div className="region-panel-head"><div><h3>底图设置</h3></div><button type="button" disabled={readOnly} onClick={() => fileInputRef.current?.click()}>上传</button></div>
+            <div className="region-panel-head">
+              <div><h3>底图设置</h3></div>
+              <div className="region-panel-head-actions">
+                <button type="button" disabled={readOnly} onClick={() => fileInputRef.current?.click()}>上传</button>
+                <button type="button" className="region-panel-close" aria-label="关闭" onClick={() => togglePanel("background")}>×</button>
+              </div>
+            </div>
             <section className="region-param-section background-library-section">
               <div className="region-param-section-title">
                 <h4>素材库</h4>
@@ -2027,7 +2253,7 @@ export function RegionManagementPage({
               )}
             </section>
             <div className="region-bg-footer">
-              <p className="region-param-message">{selectedBackground ? "画布底图已选中：拖动/缩放，Delete 删除" : backgroundMessage}</p>
+              <p className="region-param-message">{selectedBackground ? "画布底图已选中：拖动/四角绕中心等比缩放/顶部旋转，Delete 删除" : backgroundMessage}</p>
               <button
                 type="button"
                 className="primary-button"
@@ -2040,7 +2266,10 @@ export function RegionManagementPage({
           </> : null}
 
           {activePanel === "detection" ? <>
-            <div className="region-panel-head"><div><h3>探测范围</h3></div></div>
+            <div className="region-panel-head">
+              <div><h3>探测范围</h3></div>
+              <button type="button" className="region-panel-close" aria-label="关闭" onClick={() => togglePanel("detection")}>×</button>
+            </div>
             {detection.mode !== "rect" && detection.mode !== "learned" ? <p className="region-range-hint">{getDetectionHint(detection)}</p> : null}
             <div className="detection-mode-tabs">{(["rect", "learned", "custom"] as const).map((mode) => <button type="button" key={mode} className={detection.mode === mode ? "active" : ""} disabled={readOnly && mode !== detection.mode} onClick={() => {
               if (learningLocked && mode !== "learned") {
@@ -2049,11 +2278,8 @@ export function RegionManagementPage({
               }
               const next = cloneConfig(regionConfig);
               next.detection.mode = mode;
-              if (mode === "learned") {
-                // A new learning session never previews the previous result.
-                // The backend permanently clears it only after Start is pressed.
-                next.detection.learnedPointsCm = [];
-              } else if (mode === "custom") {
+              // 学习点由“开始学习”清空；切换 Tab 时保留已生效的学习范围，避免未同步草稿时画面丢失
+              if (mode === "custom") {
                 // Start a fresh custom draft; closing without apply restores last applied range.
                 next.detection.customConfirmed = false;
                 next.detection.customPointsCm = [];
@@ -2074,7 +2300,7 @@ export function RegionManagementPage({
               void (async () => {
                 const next = cloneConfig(regionConfig);
                 next.detection.mode = "rect";
-                next.detection.appliedMode = "rect";
+                // appliedMode 仅在设备同步成功后由后端/回写更新，避免未同步成功就切走学习范围显示
                 next.rangeBox = {
                   xMin: next.detection.rectCm.xMin / 100,
                   xMax: next.detection.rectCm.xMax / 100,
@@ -2121,7 +2347,7 @@ export function RegionManagementPage({
                 const next = cloneConfig(regionConfig);
                 next.detection.mode = "custom";
                 next.detection.customConfirmed = true;
-                next.detection.appliedMode = "custom";
+                // appliedMode 仅在同步成功后更新，失败时继续显示当前生效的学习/四方范围
                 const saved = await persistRegionConfig(next, { customRange: true });
                 if (saved) refreshDetectionBaseline();
               })();

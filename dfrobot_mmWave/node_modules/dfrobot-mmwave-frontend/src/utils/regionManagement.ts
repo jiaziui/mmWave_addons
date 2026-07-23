@@ -96,6 +96,63 @@ export const canExportCustomRange = (points: CustomRangePoint[]): boolean =>
     Math.abs(point.y) <= CUSTOM_RANGE_MAX_COORDINATE,
   );
 
+/** Four corners from rectCm, counterclockwise starting at bottom-left (editor coords). */
+export const rectCmToExportPoints = (rectCm: {
+  xMin: number;
+  xMax: number;
+  yMin: number;
+  yMax: number;
+}): CustomRangePoint[] => {
+  const xMin = Math.round(Math.min(rectCm.xMin, rectCm.xMax));
+  const xMax = Math.round(Math.max(rectCm.xMin, rectCm.xMax));
+  const yMin = Math.round(Math.min(rectCm.yMin, rectCm.yMax));
+  const yMax = Math.round(Math.max(rectCm.yMin, rectCm.yMax));
+  return [
+    { x: xMin, y: yMin },
+    { x: xMax, y: yMin },
+    { x: xMax, y: yMax },
+    { x: xMin, y: yMax },
+  ];
+};
+
+const toExportPoints = (points: Array<{ x: number; y: number }>): CustomRangePoint[] =>
+  points.map((point) => ({ x: Math.round(point.x), y: Math.round(point.y) }));
+
+/** Resolve exportable polygon points for the current detection mode. */
+export const getDetectionExportPoints = (detection: DetectionRangeConfig): CustomRangePoint[] => {
+  if (detection.mode === "rect") {
+    return rectCmToExportPoints(detection.rectCm);
+  }
+  if (detection.mode === "learned") {
+    return toExportPoints(detection.learnedPointsCm);
+  }
+  return toExportPoints(detection.customPointsCm);
+};
+
+export const getDetectionExportBlocker = (detection: DetectionRangeConfig): string | null => {
+  const points = getDetectionExportPoints(detection);
+  if (canExportCustomRange(points)) return null;
+  if (detection.mode === "rect") {
+    return "当前四方探测范围坐标无效，无法导出";
+  }
+  if (detection.mode === "learned") {
+    if (points.length < CUSTOM_RANGE_MIN_POINTS) {
+      return `学习探测范围暂无足够坐标点，至少需要 ${CUSTOM_RANGE_MIN_POINTS} 个点才能导出`;
+    }
+    if (points.length > CUSTOM_RANGE_MAX_POINTS) {
+      return `学习探测范围点数超过 ${CUSTOM_RANGE_MAX_POINTS}，无法导出`;
+    }
+    return "学习探测范围坐标无效，无法导出";
+  }
+  if (points.length < CUSTOM_RANGE_MIN_POINTS) {
+    return `当前自定义探测范围点数据无效，至少需要 ${CUSTOM_RANGE_MIN_POINTS} 个有效点`;
+  }
+  if (points.length > CUSTOM_RANGE_MAX_POINTS) {
+    return `自定义探测范围最多支持 ${CUSTOM_RANGE_MAX_POINTS} 个点`;
+  }
+  return "当前自定义探测范围坐标无效，无法导出";
+};
+
 const parseCustomRangeInteger = (value: string, fieldName: string, lineNumber: number): number => {
   if (!/^-?\d+$/.test(value)) throw new Error(`第 ${lineNumber} 行${fieldName}必须为整数`);
   const parsed = Number(value);

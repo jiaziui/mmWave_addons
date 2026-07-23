@@ -495,6 +495,8 @@ const normalizeBackgroundInstance = (value: unknown): BaseMapInstance | null => 
   if (!id || !sourceId || widthCm <= 0 || heightCm <= 0) {
     return null;
   }
+  const rawRotation = toFiniteNumber(value.rotationDeg, 0);
+  const rotationDeg = ((rawRotation % 360) + 360) % 360;
   return {
     id,
     sourceType: value.sourceType === "user" ? "user" : "system",
@@ -503,6 +505,7 @@ const normalizeBackgroundInstance = (value: unknown): BaseMapInstance | null => 
     yCm: Math.round(toFiniteNumber(value.yCm, 0)),
     widthCm,
     heightCm,
+    rotationDeg: Math.round(rotationDeg * 10) / 10,
     visible: typeof value.visible === "boolean" ? value.visible : true,
     zIndex: Math.round(toFiniteNumber(value.zIndex, 0)),
   };
@@ -950,6 +953,24 @@ export class DeviceStorage {
         checkToActiveFrames: updates.detectionMode === 1 ? 2 : 7,
         unmannedTime: updates.detectionMode === 1 ? 5 : 30,
       },
+      // 与固件侧主动下发的默认四方 8×8 保持一致
+      regionConfig: normalizeRegionConfig({
+        ...current.regionConfig,
+        rangeBox: { xMin: -4, xMax: 4, yMin: 0, yMax: 8 },
+        detection: {
+          mode: "rect",
+          appliedMode: "rect",
+          rectCm: { xMin: -400, xMax: 400, yMin: 0, yMax: 800 },
+          learnedPointsCm: [],
+          customPointsCm: [],
+          customConfirmed: false,
+        },
+        syncState: {
+          ...current.regionConfig.syncState,
+          fourSidedRange: "synced",
+          updatedAt: now,
+        },
+      }),
       discovery: {
         ...current.discovery,
         lastUpdated: now,
@@ -1040,8 +1061,15 @@ export class DeviceStorage {
       throw new Error("Device not found");
     }
 
+    const maxSequence = nextDevices.reduce((max, device) => {
+      const parsed = Number(device.deviceNo);
+      return Number.isSafeInteger(parsed) && parsed > 0 ? Math.max(max, parsed) : max;
+    }, 0);
+
     this.writeBindingRegistry({
       ...registry,
+      // 解绑后回收序号，避免前端按 max+1 预览、后端仍用旧 nextSequence 导致设备号不一致
+      nextSequence: maxSequence + 1,
       devices: nextDevices,
     });
     fs.rmSync(this.getDeviceDir(id), { recursive: true, force: true });
@@ -1080,24 +1108,35 @@ export class DeviceStorage {
     consumeSequence: boolean,
   ): { deviceNo: string; nextSequence: number } {
     const existing = registry.devices.find((device) => device.id === id);
-    if (updates.deviceNoMode === "custom") {
-      const customDeviceNo = normalizeDeviceNo(updates.customDeviceNo ?? "");
-      if (!customDeviceNo) {
+    const claimDeviceNo = (deviceNo: string): { deviceNo: string; nextSequence: number } => {
+      if (!deviceNo) {
         throw new Error("Device number is required");
       }
-      if (customDeviceNo.length > 24) {
+      if (deviceNo.length > 24) {
         throw new Error("Device number is too long");
       }
       const duplicated = registry.devices.some(
-        (device) => device.deviceNo === customDeviceNo && device.id !== id,
+        (device) => device.deviceNo === deviceNo && device.id !== id,
       );
       if (duplicated) {
         throw new Error("Device number already exists");
       }
-      return {
-        deviceNo: customDeviceNo,
-        nextSequence: registry.nextSequence,
-      };
+      const parsed = Number(deviceNo);
+      const nextSequence = Number.isSafeInteger(parsed) && parsed > 0
+        ? Math.max(registry.nextSequence, parsed + 1)
+        : registry.nextSequence;
+      return { deviceNo, nextSequence };
+    };
+
+    // 自定义模式：只使用用户提交的自定义号，绝不回落到自动序号
+    if (updates.deviceNoMode === "custom") {
+      return claimDeviceNo(normalizeDeviceNo(updates.customDeviceNo ?? ""));
+    }
+
+    // 自动模式：优先使用前端快照的自动号，保证与向导展示一致
+    const preferredAutoNo = normalizeDeviceNo(updates.customDeviceNo ?? "");
+    if (preferredAutoNo) {
+      return claimDeviceNo(preferredAutoNo);
     }
 
     if (existing?.deviceNo) {

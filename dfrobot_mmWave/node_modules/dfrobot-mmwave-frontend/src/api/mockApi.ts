@@ -159,6 +159,7 @@ const createRegionConfig = (variant: "kitchen" | "living" | "study"): StoredRegi
           yCm: 280,
           widthCm: 440,
           heightCm: 260,
+          rotationDeg: 0,
           visible: true,
           zIndex: 0,
         },
@@ -556,19 +557,47 @@ export const mockLearnedRangeAction = async (
     regionConfigs[deviceId].detection.learnedPointsCm = [];
     regionConfigs[deviceId].syncState.learnedRange = "local_only";
     current.status = "confirming_single_target";
-    current.learningEnabled = false;
+    current.learningEnabled = true;
     current.singleTargetConfirmCount = 0;
     current.pointCount = 0;
     current.pointsCm = [];
     current.message = "正在确认单目标条件";
   } else if (action === "stop") {
+    // 关闭学习 = 学习完成：固件自动采用学习范围
+    const points = current.pointsCm.length >= 3 ? current.pointsCm : structuredClone(learnedPolygonCm);
+    regionConfigs[deviceId].detection = {
+      ...regionConfigs[deviceId].detection,
+      mode: "learned",
+      appliedMode: "learned",
+      learnedPointsCm: structuredClone(points),
+    };
+    regionConfigs[deviceId].syncState.learnedRange = "synced";
     current.status = "ready";
     current.learningEnabled = false;
     current.singleTargetConfirmCount = 0;
-    current.message = "学习已停止，等待读取最终范围";
+    current.pointCount = points.length;
+    current.pointsCm = structuredClone(points);
+    current.message = "学习范围已更新，固件已切换为学习探测范围";
   } else {
-    current.status = current.pointCount >= 3 ? "ready" : "error";
-    current.message = current.pointCount >= 3 ? "学习范围读取完成" : "学习已停止，但最终范围读取失败";
+    if (current.pointCount >= 3 || regionConfigs[deviceId].detection.learnedPointsCm.length >= 3) {
+      const points = current.pointsCm.length >= 3
+        ? current.pointsCm
+        : regionConfigs[deviceId].detection.learnedPointsCm;
+      regionConfigs[deviceId].detection = {
+        ...regionConfigs[deviceId].detection,
+        mode: "learned",
+        appliedMode: "learned",
+        learnedPointsCm: structuredClone(points),
+      };
+      regionConfigs[deviceId].syncState.learnedRange = "synced";
+      current.status = "ready";
+      current.pointCount = points.length;
+      current.pointsCm = structuredClone(points);
+      current.message = "学习范围读取完成";
+    } else {
+      current.status = "error";
+      current.message = "学习已停止，但最终范围读取失败";
+    }
   }
   current.updatedAt = new Date().toISOString();
   mockLearnedRanges[deviceId] = current;
@@ -675,8 +704,26 @@ export const mockUpdateConfig = async (
   if (device.discovery.status !== "online") {
     throw new Error("设备离线，当前为只读模式");
   }
+  const previousAppliedMode =
+    regionConfigs[deviceId]?.detection.appliedMode ?? regionConfigs[deviceId]?.detection.mode ?? "rect";
   if (payload.regionConfig) {
-    regionConfigs[deviceId] = structuredClone(payload.regionConfig);
+    const next = structuredClone(payload.regionConfig);
+    if (payload.apply?.fourSidedRange) {
+      // 与后端一致：仅同步成功后才把 appliedMode 切到四方
+      next.detection.mode = "rect";
+      next.detection.appliedMode = "rect";
+    }
+    if (payload.apply?.customRange) {
+      next.detection.mode = "custom";
+      next.detection.appliedMode = "custom";
+      next.detection.customConfirmed = true;
+      next.syncState.customRange = "synced";
+    }
+    if (!payload.apply?.fourSidedRange && !payload.apply?.customRange) {
+      // 纯本地草稿保存时保留固件生效模式
+      next.detection.appliedMode = previousAppliedMode;
+    }
+    regionConfigs[deviceId] = next;
     device.regionConfig = regionConfigs[deviceId];
   }
   if (payload.deviceSettings) {
@@ -758,13 +805,29 @@ export const mockInitializeDevice = async (
 ): Promise<{ ok: boolean; device: StoredMmwaveDevice }> => {
   const device = devices.find((entry) => entry.id === deviceId);
   if (!device) throw new Error("Mock device not found");
+  if (device.discovery.status !== "online") {
+    throw new Error("设备离线，无法进行初始化绑定");
+  }
   const usedNumbers = devices
-    .map((entry) => Number(entry.deviceNo))
-    .filter((value) => Number.isFinite(value) && value > 0);
-  const nextNo =
-    payload.deviceNoMode === "custom" && payload.customDeviceNo
-      ? payload.customDeviceNo
-      : String((usedNumbers.length ? Math.max(...usedNumbers) : 0) + 1);
+    .filter((entry) => entry.id !== deviceId)
+    .map((entry) => entry.deviceNo)
+    .filter((value): value is string => Boolean(value));
+  const requestedNo = (payload.customDeviceNo ?? "").trim();
+  let nextNo = requestedNo;
+  if (payload.deviceNoMode === "custom") {
+    if (!requestedNo) throw new Error("请输入自定义设备号");
+    if (usedNumbers.includes(requestedNo)) throw new Error("设备号已存在，请更换后再继续");
+    nextNo = requestedNo;
+  } else {
+    if (!requestedNo) {
+      const maxNo = usedNumbers
+        .map(Number)
+        .filter((value) => Number.isFinite(value) && value > 0)
+        .reduce((max, value) => Math.max(max, value), 0);
+      nextNo = String(maxNo + 1);
+    }
+    if (usedNumbers.includes(nextNo)) throw new Error("设备号已存在，请更换后再继续");
+  }
   device.initialized = true;
   device.deviceNo = nextNo;
   device.deploymentName = device.deploymentName || `设备 ${nextNo}`;
@@ -783,7 +846,27 @@ export const mockInitializeDevice = async (
   device.mqttTopicPrefix = `c4004_${nextNo}`;
   device.mqttKey = `c4004_${nextNo}`;
   device.name = `c4004_${nextNo}`;
-  regionConfigs[deviceId] = createRegionConfig("kitchen");
+  // 与正式后端一致：初次绑定默认四方 8×8（cm: -400~400 / 0~800）
+  regionConfigs[deviceId] = {
+    ...createRegionConfig("kitchen"),
+    rangeBox: { xMin: -4, xMax: 4, yMin: 0, yMax: 8 },
+    detection: {
+      mode: "rect",
+      appliedMode: "rect",
+      rectCm: { xMin: -400, xMax: 400, yMin: 0, yMax: 800 },
+      learnedPointsCm: [],
+      customPointsCm: [],
+      customConfirmed: false,
+    },
+    syncState: {
+      fourSidedRange: "synced",
+      regionMcuIo: "local_only",
+      tagConfig: "local_only",
+      customRange: "local_only",
+      learnedRange: "local_only",
+      updatedAt: new Date().toISOString(),
+    },
+  };
   device.regionConfig = regionConfigs[deviceId];
   return { ok: true, device: structuredClone(device) };
 };

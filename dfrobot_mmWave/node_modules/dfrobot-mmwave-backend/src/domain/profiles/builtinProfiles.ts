@@ -23,6 +23,9 @@ import {
 
 const DEFAULT_COORDINATE: RangeBox = { xMin: -5, xMax: 5, yMin: 0, yMax: 9 };
 
+/** 初次绑定默认下发的四方探测范围（米）：8m × 8m */
+export const INIT_FOUR_SIDED_RANGE_BOX: RangeBox = { xMin: -4, xMax: 4, yMin: 0, yMax: 8 };
+
 const DETECTION_MODE_PARAMS = {
   1: {
     checkToActiveFrames: 2,
@@ -594,7 +597,24 @@ export const c4004ProfileAdapter: MmwaveProfileAdapter = {
   initializeDevice: async (client, device, payload) => {
     const modeParams = DETECTION_MODE_PARAMS[payload.detectionMode];
     const entityRegistryEntries = await loadEntityRegistry(client);
-    await writeC4004Entity(client, device, "installHeight", Math.round(payload.installHeightM * 100), entityRegistryEntries);
+    // 安装参数先写入 HA pending 实体，再按 set_install_info 真正下发固件
+    // 与向导 Step2 一致：侧装 / 0° / 安装高度
+    await writeC4004Entity(client, device, "installMode", "Side", entityRegistryEntries);
+    await writeC4004Entity(client, device, "installZAngle", 0, entityRegistryEntries);
+    await writeC4004Entity(
+      client,
+      device,
+      "installHeight",
+      Math.round(payload.installHeightM * 100),
+      entityRegistryEntries,
+    );
+    await writeC4004Entity(client, device, "setInstallInfo", undefined, entityRegistryEntries);
+    // 默认四方探测范围 8×8：xmin:-400,xmax:400,ymin:0,ymax:800（cm）
+    await writeC4004Entity(client, device, "rangeXMin", Math.round(INIT_FOUR_SIDED_RANGE_BOX.xMin * 100), entityRegistryEntries);
+    await writeC4004Entity(client, device, "rangeXMax", Math.round(INIT_FOUR_SIDED_RANGE_BOX.xMax * 100), entityRegistryEntries);
+    await writeC4004Entity(client, device, "rangeYMin", Math.round(INIT_FOUR_SIDED_RANGE_BOX.yMin * 100), entityRegistryEntries);
+    await writeC4004Entity(client, device, "rangeYMax", Math.round(INIT_FOUR_SIDED_RANGE_BOX.yMax * 100), entityRegistryEntries);
+    await writeC4004Entity(client, device, "setFourSidedRangeMode", undefined, entityRegistryEntries);
     await writeC4004Entity(client, device, "checkToActiveFrames", modeParams.checkToActiveFrames, entityRegistryEntries);
     await writeC4004Entity(client, device, "unmannedTime", modeParams.unmannedTime, entityRegistryEntries);
   },
