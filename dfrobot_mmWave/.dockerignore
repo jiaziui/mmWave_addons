@@ -1,0 +1,34 @@
+# Git
+.git
+.github
+
+# Dependencies
+node_modules
+**/node_modules
+
+# Source code
+backend/src
+frontend/src
+
+# Development files
+backend/tsconfig.json
+frontend/tsconfig.json
+frontend/vite.config.*
+frontend/tailwind.config.*
+frontend/postcss.config.*
+
+# Tests
+**/*.test.*
+**/*.spec.*
+**/__tests__/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Documentation not required by runtime
+README.md
+DOCS.md
+CHANGELOG.md
+icon.png
+logo.png
