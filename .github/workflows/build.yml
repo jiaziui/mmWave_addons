@@ -1,0 +1,227 @@
+name: Build mmWave App
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+
+  # ==========================================================
+  # 1. TypeScript / React 只编译一次
+  # ==========================================================
+
+  compile:
+    name: Compile application
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: dfrobot_mmWave/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ./dfrobot_mmWave
+        run: npm ci
+
+      - name: Build backend and frontend
+        working-directory: ./dfrobot_mmWave
+        run: npm run build
+
+      - name: Verify build
+        run: |
+          test -d dfrobot_mmWave/backend/dist
+          test -d dfrobot_mmWave/frontend/dist
+
+          echo "Backend build:"
+          find dfrobot_mmWave/backend/dist -maxdepth 2 -type f | head -50
+
+          echo "Frontend build:"
+          find dfrobot_mmWave/frontend/dist -maxdepth 2 -type f | head -50
+
+      - name: Package compiled application
+        run: |
+          tar \
+            -C dfrobot_mmWave \
+            -czf compiled-js.tar.gz \
+            backend/dist \
+            frontend/dist
+
+      - name: Upload compiled application
+        uses: actions/upload-artifact@v7
+        with:
+          name: compiled-js
+          path: compiled-js.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+
+  # ==========================================================
+  # 2. Home Assistant Builder 准备架构矩阵
+  # ==========================================================
+
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-latest
+
+    outputs:
+      architectures: ${{ steps.info.outputs.architectures }}
+      build_matrix: ${{ steps.matrix.outputs.matrix }}
+      image_name: ${{ steps.normalize.outputs.image_name }}
+      registry_prefix: ${{ steps.normalize.outputs.registry_prefix }}
+      version: ${{ steps.normalize.outputs.version }}
+      name: ${{ steps.normalize.outputs.name }}
+      description: ${{ steps.normalize.outputs.description }}
+      url: ${{ steps.normalize.outputs.url }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Get app information
+        id: info
+        uses: home-assistant/actions/helpers/info@master
+        with:
+          path: "./dfrobot_mmWave"
+
+      - name: Normalize app information
+        id: normalize
+        shell: bash
+        run: |
+          image="${{ steps.info.outputs.image }}"
+
+          echo "image_name=${image##*/}" >> "$GITHUB_OUTPUT"
+          echo "registry_prefix=${image%/*}" >> "$GITHUB_OUTPUT"
+          echo "version=${{ steps.info.outputs.version }}" >> "$GITHUB_OUTPUT"
+          echo "name=${{ steps.info.outputs.name }}" >> "$GITHUB_OUTPUT"
+          echo "description=${{ steps.info.outputs.description }}" >> "$GITHUB_OUTPUT"
+
+          url="${{ steps.info.outputs.url }}"
+          if [[ -n "$url" && "$url" != "null" ]]; then
+            echo "url=${url}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare build matrix
+        id: matrix
+        uses: home-assistant/builder/actions/prepare-multi-arch-matrix@2026.06.0
+        with:
+          architectures: ${{ steps.info.outputs.architectures }}
+          image-name: ${{ steps.normalize.outputs.image_name }}
+          registry-prefix: ${{ steps.normalize.outputs.registry_prefix }}
+
+
+  # ==========================================================
+  # 3. 使用同一份 dist 打 amd64 / aarch64 镜像
+  # ==========================================================
+
+  build:
+    name: Build ${{ matrix.arch }}
+
+    needs:
+      - compile
+      - prepare
+
+    runs-on: ${{ matrix.os }}
+
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.build_matrix) }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download compiled application
+        uses: actions/download-artifact@v8
+        with:
+          name: compiled-js
+          path: .
+
+      - name: Restore compiled application
+        run: |
+          rm -rf \
+            dfrobot_mmWave/backend/dist \
+            dfrobot_mmWave/frontend/dist
+
+          tar \
+            -xzf compiled-js.tar.gz \
+            -C dfrobot_mmWave
+
+          test -d dfrobot_mmWave/backend/dist
+          test -d dfrobot_mmWave/frontend/dist
+
+      - name: Build and publish image
+        uses: home-assistant/builder/actions/build-image@2026.06.0
+        with:
+          arch: ${{ matrix.arch }}
+
+          container-registry-password: ${{ secrets.GITHUB_TOKEN }}
+
+          context: "./dfrobot_mmWave"
+
+          image: ${{ matrix.image }}
+
+          image-tags: |
+            ${{ needs.prepare.outputs.version }}
+            latest
+
+          labels: |
+            io.hass.type=app
+            io.hass.name=${{ needs.prepare.outputs.name }}
+            io.hass.description=${{ needs.prepare.outputs.description }}
+            ${{ needs.prepare.outputs.url && format('io.hass.url={0}', needs.prepare.outputs.url) || '' }}
+
+          push: true
+
+          version: ${{ needs.prepare.outputs.version }}
+
+
+  # ==========================================================
+  # 4. 生成统一 Multi-Arch Manifest
+  # ==========================================================
+
+  manifest:
+    name: Publish multi-arch manifest
+
+    needs:
+      - prepare
+      - build
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      packages: write
+
+    steps:
+      - name: Publish multi-arch manifest
+        uses: home-assistant/builder/actions/publish-multi-arch-manifest@2026.06.0
+        with:
+          architectures: ${{ needs.prepare.outputs.architectures }}
+
+          container-registry-password: ${{ secrets.GITHUB_TOKEN }}
+
+          image-name: ${{ needs.prepare.outputs.image_name }}
+
+          image-tags: |
+            ${{ needs.prepare.outputs.version }}
+            latest
+
+          registry-prefix: ${{ needs.prepare.outputs.registry_prefix }}
