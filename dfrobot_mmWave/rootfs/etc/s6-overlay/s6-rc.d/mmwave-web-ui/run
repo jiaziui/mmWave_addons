@@ -1,0 +1,23 @@
+#!/command/with-contenv bashio
+set -euo pipefail
+
+cd /app
+export NODE_ENV="${NODE_ENV:-production}"
+export DEVICE_DATA_DIR="${DEVICE_DATA_DIR:-/data/dfrobot_mmwave}"
+export LEGACY_DATA_DIR="${LEGACY_DATA_DIR:-/config/dfrobot_mmwave}"
+export USER_BASE_MAP_DIR="${USER_BASE_MAP_DIR:-/config/dfrobot_mmwave/base_maps/user}"
+PORT_CONFIG="$(bashio::config 'port')"
+if [ -n "${PORT_CONFIG}" ] && [ "${PORT_CONFIG}" != "null" ]; then
+  export PORT="${PORT_CONFIG}"
+else
+  export PORT="${PORT:-42069}"
+fi
+
+bashio::log.info "Starting DFRobot mmWave UI on port ${PORT}"
+bashio::log.info "Persisting mmWave device data in ${DEVICE_DATA_DIR} (Supervisor-managed add-on data)"
+bashio::log.info "Persisting user base maps in ${USER_BASE_MAP_DIR} (Home Assistant host path: /homeassistant/dfrobot_mmwave/base_maps/user)"
+if [ "${PORT}" != "42069" ]; then
+  bashio::log.warning "Ingress is configured for port 42069. Changing app port may disable ingress."
+fi
+
+exec node backend/dist/index.js
