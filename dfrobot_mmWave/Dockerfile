@@ -72,7 +72,7 @@ RUN chmod +x \
 LABEL \
     org.opencontainers.image.title="DFRobot mmWave" \
     org.opencontainers.image.description="DFRobot mmWave Home Assistant App" \
-    org.opencontainers.image.source="https://github.com/cdjq/mmWave_addons"
+    org.opencontainers.image.source="https://github.com/jiaziui/mmWave_addons"
 
 
 EXPOSE 42069/tcp
