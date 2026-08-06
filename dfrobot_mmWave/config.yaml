@@ -6,13 +6,13 @@ description: >-
   DFRobot mmWave web console for Home Assistant with
   multi-device overview and device detail pages.
 
-url: https://github.com/cdjq/mmWave_addons_repo
+url: https://github.com/jiaziui/mmWave_addons_repo
 
 arch:
   - aarch64
   - amd64
 
-image: "ghcr.io/cdjq/mmwave-addons"
+image: "ghcr.io/jiaziui/mmwave-addons"
 
 startup: services
 boot: auto
